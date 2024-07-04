@@ -104,7 +104,6 @@ int gen_new_salt(unsigned char *salt, size_t n, char *filepath) {
 int find_salt(unsigned char *salt, size_t n) {
   char homedir[PATH_MAX];
   char filepath[PATH_MAX];
-  char fbuf[n];
 
   get_homedir(homedir);
   cwk_path_join(homedir, ".passc/salt", filepath, sizeof(filepath));
@@ -114,8 +113,8 @@ int find_salt(unsigned char *salt, size_t n) {
     return gen_new_salt(salt, n, filepath);
   }
 
-  size_t len = fread(fbuf, 1, sizeof(fbuf), fp);
-  if (ferror(fp) != 0) {
+  size_t len = fread(salt, 1, n, fp);
+  if (len != n || ferror(fp) != 0) {
     fprintf(stderr, "failed to read salt file\n");
     fclose(fp);
     return -1;
@@ -126,6 +125,7 @@ int find_salt(unsigned char *salt, size_t n) {
   return 1;
 }
 
+// creates a new derived key from user passphrase
 int gen_vault_derived_key() {
   char *passphrase = NULL;
   size_t plen = 0;
@@ -154,7 +154,6 @@ int gen_vault_derived_key() {
                     crypto_pwhash_MEMLIMIT_MODERATE,
                     crypto_pwhash_ALG_DEFAULT) != 0) {
     free(passphrase);
-
     fprintf(stderr, "out of memory, couldn't derive key from pw\n");
     return -1;
   }
