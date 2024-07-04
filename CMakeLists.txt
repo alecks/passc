@@ -17,6 +17,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/lib/cwalk)
 
 add_executable(${PROJECT_NAME} main.c)
 
+target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_link_libraries(${PROJECT_NAME}
   PRIVATE sodium
   PRIVATE sqlite3

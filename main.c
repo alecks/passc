@@ -58,7 +58,9 @@ ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
     return -1;
 
   nread = getline(lineptr, n, stream);
-  (*lineptr)[--nread] = '\0'; // replace \n
+  if (nread > 0) {
+    (*lineptr)[--nread] = '\0'; // replace \n
+  }
 
   // restores terminal to old
   tcsetattr(fileno(stream), TCSAFLUSH, &old);
@@ -69,7 +71,7 @@ ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
 void get_homedir(char *outdir) {
   char *dir;
   struct passwd *pwd = getpwuid(getuid());
-  if (pwd) {
+  if (pwd && pwd->pw_dir) {
     dir = pwd->pw_dir;
   } else {
     dir = getenv("HOME");
@@ -78,7 +80,7 @@ void get_homedir(char *outdir) {
   if (!dir) {
     dir = ".";
   }
-  strcpy(outdir, dir);
+  snprintf(outdir, PATH_MAX, "%s", dir);
 }
 
 int gen_new_salt(unsigned char *salt, size_t n, char *filepath) {
@@ -86,13 +88,13 @@ int gen_new_salt(unsigned char *salt, size_t n, char *filepath) {
   randombytes_buf(salt, n);
 
   FILE *fp = fopen(filepath, "w");
-  if (fp == NULL) {
-    fprintf(stderr, "couldn't open salt file for writing\n");
+  if (!fp) {
+    perror("gen_new_salt: couldn't open salt file for writing");
     return -1;
   }
   if (fwrite(salt, 1, n, fp) != n) {
     fclose(fp);
-    fprintf(stderr, "bytes of salt written didn't match expected\n");
+    fprintf(stderr, "gen_new_salt: unexpected num of bytes written\n");
     return -1;
   }
 
@@ -109,35 +111,41 @@ int find_salt(unsigned char *salt, size_t n) {
   cwk_path_join(homedir, ".passc/salt", filepath, sizeof(filepath));
 
   FILE *fp = fopen(filepath, "r");
-  if (fp == NULL) {
+  if (!fp) {
+    // TODO: restrict to EEXIST
     return gen_new_salt(salt, n, filepath);
   }
 
-  size_t len = fread(salt, 1, n, fp);
-  if (len != n || ferror(fp) != 0) {
-    fprintf(stderr, "failed to read salt file\n");
+  size_t readlen = fread(salt, 1, n, fp);
+  if (ferror(fp) != 0) {
+    perror("find_salt: failed to read salt file");
+    fclose(fp);
+    return -1;
+  } else if (readlen != n) {
+    fprintf(stderr, "find_salt: read less bytes than required from salt file");
     fclose(fp);
     return -1;
   }
 
   fclose(fp);
-  verbosef("using found salt file\n");
+  verbosef("v: using found salt file\n");
   return 1;
 }
 
 // creates a new derived key from user passphrase
-int gen_vault_derived_key() {
-  char *passphrase = NULL;
-  size_t plen = 0;
-
-  printf("A key will be derived from your given passphrase.\n"
+int gen_vault_derived_key(void) {
+  printf("KEY CREATION: A key will be derived from your given passphrase.\n"
          "Ensure this is different to those used by other vaults.\n"
          "Enter passphrase: ");
 
-  ssize_t nread = passc_getpassline(&passphrase, &plen, stdin);
-  if (nread == -1) {
+  char *passphrase = NULL;
+  size_t psize = 0;
+
+  ssize_t readlen = passc_getpassline(&passphrase, &psize, stdin);
+  if (readlen == -1) {
     free(passphrase);
-    fprintf(stderr, "could not read passphrase from stdin\n");
+    fprintf(stderr,
+            "gen_vault_derived_key: could not read passphrase from stdin\n");
     return -1;
   }
 
@@ -149,12 +157,13 @@ int gen_vault_derived_key() {
     return -1;
   }
   verbosef("v: deriving key from passphrase\n");
-  if (crypto_pwhash(key, sizeof(key), passphrase, nread, salt,
+  if (crypto_pwhash(key, sizeof(key), passphrase, readlen, salt,
                     crypto_pwhash_OPSLIMIT_MODERATE,
                     crypto_pwhash_MEMLIMIT_MODERATE,
                     crypto_pwhash_ALG_DEFAULT) != 0) {
     free(passphrase);
-    fprintf(stderr, "out of memory, couldn't derive key from pw\n");
+    fprintf(stderr,
+            "gen_vault_derived_key: libsodium reported out of memory\n");
     return -1;
   }
   free(passphrase);
@@ -170,7 +179,7 @@ int db_migrate_up(sqlite3 *db) {
   sqlite3_exec(db, MIGRATION_QUERY, NULL, NULL, &errmsg);
 
   if (errmsg) {
-    fprintf(stderr, "failed to migrate db: %s\n", errmsg);
+    fprintf(stderr, "db_migrate_up: failed to migrate db: %s\n", errmsg);
     sqlite3_free(errmsg);
     sqlite3_close(db);
     return -1;
@@ -187,7 +196,8 @@ int db_init(const char *filename, sqlite3 **outhdl) {
   int rc = sqlite3_open_v2(filename, &db,
                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
   if (rc != SQLITE_OK) {
-    fprintf(stderr, "failed to open sqlite3 db: %s\n", sqlite3_errmsg(db));
+    fprintf(stderr, "db_init: failed to open sqlite3 db: %s\n",
+            sqlite3_errmsg(db));
     sqlite3_close(db);
     return -1;
   }
@@ -201,7 +211,6 @@ int db_init(const char *filename, sqlite3 **outhdl) {
 int db_vault_create(sqlite3 *db, const char *vname) {
   sqlite3_stmt *stmt;
 
-  verbosef("v: starting key creation process\n");
   if (gen_vault_derived_key() < 0)
     return -1;
 
@@ -211,16 +220,18 @@ int db_vault_create(sqlite3 *db, const char *vname) {
   sqlite3_free(queryt);
 
   if (rc != SQLITE_OK) {
-    fprintf(stderr, "could not prepare query: %s\n", sqlite3_errmsg(db));
+    fprintf(stderr, "db_vault_create: could not prepare query: %s\n",
+            sqlite3_errmsg(db));
     sqlite3_finalize(stmt);
     return -1;
   }
 
   int res = 0;
   if (sqlite3_step(stmt) == SQLITE_DONE) {
-    printf("created new vault: %s\n", vname);
+    printf("Created new vault: %s\n", vname);
   } else {
-    fprintf(stderr, "failed to advance query: %s\n", sqlite3_errmsg(db));
+    fprintf(stderr, "db_vault_create: failed to advance query: %s\n",
+            sqlite3_errmsg(db));
     res = -1;
   }
 
@@ -283,7 +294,7 @@ int subcmd_vault_list(const char *vname) {
   return 0;
 }
 
-int passc_dirinit() {
+int passc_dirinit(void) {
   char pth[PATH_MAX];
   char homedir[PATH_MAX];
 
@@ -306,9 +317,9 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  int opt;
-  const char *vault_name = "main";
+  const char *vault_name = NULL;
 
+  int opt;
   while ((opt = getopt(argc, argv, "vn::")) != -1) {
     switch (opt) {
     case 'n':
@@ -322,6 +333,9 @@ int main(int argc, char **argv) {
       return EXIT_FAILURE;
     }
   }
+
+  if (!vault_name)
+    vault_name = "main";
 
   // this is after getopt; contains verbose logging
   if (passc_dirinit() != 0)
