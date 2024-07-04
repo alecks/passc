@@ -16,9 +16,25 @@
 void perr_usage(char *pname) {
   fprintf(stderr,
           "Usage:\n"
-          "  %1$s [-v vault_name] (add|rm|get) <password name>\n"
-          "  %1$s [-v vault_name] info\n",
+          "  %1$s [-n vault_name] (add|rm|get) <password name>\n"
+          "  %1$s [-n vault_name] info\n"
+          "\n"
+          "Options:\n"
+          "  -v Enable verbose logging.\n",
           pname);
+}
+
+int _passc_log_level = 0;
+
+void verbosef(const char *format, ...) {
+  if (_passc_log_level < 1)
+    return;
+
+  va_list args;
+
+  va_start(args, format);
+  vprintf(format, args);
+  va_end(args);
 }
 
 int db_migrate_up(sqlite3 *db) {
@@ -32,6 +48,7 @@ int db_migrate_up(sqlite3 *db) {
     return -1;
   }
 
+  verbosef("v: migrated db, no error\n");
   return 0;
 }
 
@@ -50,11 +67,39 @@ int db_init(const char *filename, sqlite3 **outhdl) {
   if (outhdl) {
     *outhdl = db;
   }
+  verbosef("v: sqlite3 db opened\n");
   return db_migrate_up(db);
 }
 
-int vault_create(sqlite3 *db, const char *vname) { return -2; }
+// creates a new vault. returns 0 if successful, otherwise negative.
+int vault_create(sqlite3 *db, const char *vname) {
+  sqlite3_stmt *stmt;
 
+  const char *querytext =
+      sqlite3_mprintf("INSERT INTO vaults (vname) VALUES (%Q)", vname);
+  int rc = sqlite3_prepare(db, querytext, -1, &stmt, NULL);
+  sqlite3_free(querytext);
+
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "could not prepare query: %s\n", sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+    return -1;
+  }
+
+  int res = 0;
+  if (sqlite3_step(stmt) == SQLITE_DONE) {
+    printf("created new vault: %s\n", vname);
+  } else {
+    fprintf(stderr, "failed to advance query: %s\n", sqlite3_errmsg(db));
+    res = -1;
+  }
+
+  sqlite3_finalize(stmt);
+  return res;
+}
+
+// checks if a vault exists, creates if it doesn't. returns 1 if already exists,
+// 0 on create, negative if error.
 int vault_init(sqlite3 *db, const char *vname) {
   sqlite3_stmt *stmt;
 
@@ -76,6 +121,7 @@ int vault_init(sqlite3 *db, const char *vname) {
     res = vault_create(db, vname);
     break;
   case SQLITE_ROW:
+    verbosef("v: vault found, continuing\n");
     res = 1;
     break;
   default:
@@ -96,10 +142,13 @@ int main(int argc, char **argv) {
   int opt;
   const char *vault_name = "main";
 
-  while ((opt = getopt(argc, argv, "v::")) != -1) {
+  while ((opt = getopt(argc, argv, "vn::")) != -1) {
     switch (opt) {
-    case 'v':
+    case 'n':
       vault_name = optarg;
+      break;
+    case 'v':
+      _passc_log_level = 1;
       break;
     default: // '?'
       perr_usage(argv[0]);
@@ -119,7 +168,7 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  printf("using vault: %s\n", vault_name);
+  verbosef("v: using vault %s\n", vault_name);
   if (vault_init(db, vault_name) < 0) {
     fprintf(stderr, "failed to initialise vault\n");
     return EXIT_FAILURE;
