@@ -10,8 +10,8 @@
   "CREATE TABLE IF NOT EXISTS passwords ("                                     \
   "pname TEXT PRIMARY KEY,"                                                    \
   "ciphertext BLOB NOT NULL,"                                                  \
-  "vid INTEGER NOT NULL,"                                                      \
-  "FOREIGN KEY (vid) REFERENCES vaults (vid));"
+  "vname INTEGER NOT NULL,"                                                    \
+  "FOREIGN KEY (vname) REFERENCES vaults (vname));"
 
 void perr_usage(char *pname) {
   fprintf(stderr,
