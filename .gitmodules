@@ -1,0 +1,4 @@
+[submodule "lib/cwalk"]
+	path = lib/cwalk
+	url = git@github.com:likle/cwalk.git
+	branch = stable
