@@ -13,8 +13,11 @@ FetchContent_Declare(Sodium
 set(SODIUM_DISABLE_TESTS ON)
 FetchContent_MakeAvailable(Sodium)
 
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/lib/cwalk)
+
 add_executable(${PROJECT_NAME} main.c)
 
 target_link_libraries(${PROJECT_NAME}
   PRIVATE sodium
-  PRIVATE sqlite3)
+  PRIVATE sqlite3
+  PRIVATE cwalk)
