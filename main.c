@@ -29,7 +29,7 @@ void perr_usage(const char *pname) {
           "\n"
           "Options:\n"
           "  -v Enable verbose logging.\n",
-          pname, pname); // TODO: use %n$?
+          pname, pname); // could use %n$, but this is a compiler warning
 }
 
 int _passc_log_level = 0;
