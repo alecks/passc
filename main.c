@@ -267,6 +267,7 @@ int db_vault_init(sqlite3 *db, const char *vname) {
 
   switch (sqlite3_step(stmt)) {
   case SQLITE_DONE:
+    printf("vault '%s' does not exist. creating...\n", vname);
     retcode = db_vault_create(db, vname);
     break;
   case SQLITE_ROW:
@@ -274,7 +275,8 @@ int db_vault_init(sqlite3 *db, const char *vname) {
     retcode = 1;
     break;
   default:
-    fprintf(stderr, "failed to advance query: %d %s\n", rc, sqlite3_errmsg(db));
+    fprintf(stderr, "db_vault_init: failed to advance query: %s\n",
+            sqlite3_errmsg(db));
     retcode = -1;
   }
 
