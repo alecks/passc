@@ -118,7 +118,6 @@ int find_salt(unsigned char *salt, size_t n) {
 
   FILE *fp = fopen(filepath, "r");
   if (!fp) {
-    // TODO: restrict to EEXIST
     return gen_new_salt(salt, n, filepath);
   }
 
