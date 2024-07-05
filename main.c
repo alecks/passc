@@ -43,8 +43,8 @@ void verbosef(const char *format, ...) {
   va_end(args);
 }
 
-// from gnu getpass manual: reads a password from stream until \n. this
-// implementation does NOT retain \n at end of string.
+// adapted from gnu getpass. this does NOT retain \n. locks memory with
+// sodium_mlock; callers responsibility to sodium_munlock and free.
 ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
   struct termios old, new;
   int nread;
@@ -53,7 +53,7 @@ ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
     return -1;
   new = old;
   new.c_lflag &= ~ECHO;
-  // set terminal to new
+  // set our new flags
   if (tcsetattr(fileno(stream), TCSAFLUSH, &new) != 0)
     return -1;
 
@@ -61,10 +61,16 @@ ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
   if (nread > 0) {
     (*lineptr)[--nread] = '\0'; // replace \n
   }
-
-  // restores terminal to old
-  tcsetattr(fileno(stream), TCSAFLUSH, &old);
   printf("\n");
+
+  if (sodium_mlock(*lineptr, *n) != 0) {
+    verbosef("v: sodium_mlock failed; your platform may not support this. "
+             "error: %s\n",
+             strerror(errno));
+  }
+
+  // restore to old
+  tcsetattr(fileno(stream), TCSAFLUSH, &old);
   return nread;
 }
 
@@ -134,6 +140,7 @@ int find_salt(unsigned char *salt, size_t n) {
 
 // creates a new derived key from user passphrase
 int gen_vault_derived_key(void) {
+  int retval = 0;
   printf("KEY CREATION: A key will be derived from your given passphrase.\n"
          "Ensure this is different to those used by other vaults.\n"
          "Enter passphrase: ");
@@ -143,35 +150,36 @@ int gen_vault_derived_key(void) {
 
   ssize_t readlen = passc_getpassline(&passphrase, &psize, stdin);
   if (readlen == -1) {
-    free(passphrase);
     fprintf(stderr,
             "gen_vault_derived_key: could not read passphrase from stdin\n");
-    return -1;
+    retval = -1;
+    goto cleanup;
   }
 
   unsigned char salt[crypto_pwhash_SALTBYTES];
   unsigned char key[crypto_secretbox_KEYBYTES];
 
   if (find_salt(salt, sizeof(salt)) < 0) {
-    free(passphrase);
-    return -1;
+    retval = -1;
+    goto cleanup;
   }
   verbosef("v: deriving key from passphrase\n");
   if (crypto_pwhash(key, sizeof(key), passphrase, readlen, salt,
                     crypto_pwhash_OPSLIMIT_MODERATE,
                     crypto_pwhash_MEMLIMIT_MODERATE,
                     crypto_pwhash_ALG_DEFAULT) != 0) {
-    free(passphrase);
     fprintf(stderr,
             "gen_vault_derived_key: libsodium reported out of memory\n");
-    return -1;
+    retval = -1;
+    goto cleanup;
   }
+
+cleanup:
+  // sodium_memzero is called before this function fails
+  sodium_munlock(passphrase, psize);
   free(passphrase);
-  passphrase = NULL;
 
-  // TODO: keys
-
-  return 0;
+  return retval;
 }
 
 int db_migrate_up(sqlite3 *db) {
