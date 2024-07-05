@@ -1,5 +1,4 @@
 #include "cwalk.h"
-#include "sodium/crypto_pwhash.h"
 #include <errno.h>
 #include <pwd.h>
 #include <sodium.h>
@@ -12,10 +11,12 @@
 #include <unistd.h>
 
 #define MIGRATION_QUERY                                                        \
+  "PRAGMA foreign_keys = ON;"                                                  \
   "CREATE TABLE IF NOT EXISTS vaults"                                          \
   "(vname TEXT PRIMARY KEY);"                                                  \
   "CREATE TABLE IF NOT EXISTS passwords ("                                     \
   "pname TEXT PRIMARY KEY,"                                                    \
+  "ref TEXT NOT NULL,"                                                         \
   "ciphertext BLOB NOT NULL,"                                                  \
   "vname INTEGER NOT NULL,"                                                    \
   "FOREIGN KEY (vname) REFERENCES vaults (vname));"
@@ -250,8 +251,9 @@ int db_vault_create(sqlite3 *db, const char *vname) {
 // checks if a vault exists, creates if it doesn't. returns 1 if already exists,
 // 0 on create, negative if error.
 int db_vault_init(sqlite3 *db, const char *vname) {
-  sqlite3_stmt *stmt;
+  int retcode = 0;
 
+  sqlite3_stmt *stmt;
   char *queryt =
       sqlite3_mprintf("SELECT 1 FROM vaults WHERE vname = %Q", vname);
   int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
@@ -259,27 +261,26 @@ int db_vault_init(sqlite3 *db, const char *vname) {
 
   if (rc != SQLITE_OK) {
     fprintf(stderr, "could not prepare query: %s\n", sqlite3_errmsg(db));
-    sqlite3_finalize(stmt);
-    return -1;
+    retcode = -1;
+    goto cleanup;
   }
 
-  int res = -1;
-  rc = sqlite3_step(stmt);
-  switch (rc) {
+  switch (sqlite3_step(stmt)) {
   case SQLITE_DONE:
-    res = db_vault_create(db, vname);
+    retcode = db_vault_create(db, vname);
     break;
   case SQLITE_ROW:
     verbosef("v: vault found, continuing\n");
-    res = 1;
+    retcode = 1;
     break;
   default:
     fprintf(stderr, "failed to advance query: %d %s\n", rc, sqlite3_errmsg(db));
-    res = -1;
+    retcode = -1;
   }
 
+cleanup:
   sqlite3_finalize(stmt);
-  return res;
+  return retcode;
 }
 
 // main function used for creating a db handle. runs db_init and
@@ -294,13 +295,56 @@ int make_db(const char *vname, sqlite3 **outhdl) {
 }
 
 int subcmd_vault_list(const char *vname) {
+  int retcode = 0;
+
   sqlite3 *db;
   if (make_db(vname, &db) < 0)
     return -1;
-  sqlite3_close(db);
 
-  printf("unimplemented\n");
-  return 0;
+  sqlite3_stmt *stmt;
+  char *queryt = sqlite3_mprintf(
+      "SELECT pname, ref FROM passwords WHERE vname = %Q", vname);
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "subcmd_vault_list: couldn't prepare query: %s\n",
+            sqlite3_errmsg(db));
+    retcode = -1;
+    goto cleanup;
+  }
+
+  rc = sqlite3_step(stmt);
+  while (rc == SQLITE_ROW) {
+    int nocols = sqlite3_column_count(stmt);
+
+    // we could reduce the amount of printfs here, but the code would become
+    // messy due to risk of buffer overflows
+    for (int i = 0; i < nocols; i++) {
+      printf("%s ", sqlite3_column_text(stmt, i));
+      if (i != nocols - 1) {
+        printf("| ");
+      }
+    }
+    printf("\n");
+
+    rc = sqlite3_step(stmt);
+  }
+  switch (rc) {
+  case SQLITE_DONE:
+    printf("end of vault\n");
+    retcode = 0;
+    break;
+  default:
+    fprintf(stderr, "subcmd_vault_list: failed to advance query: %s\n",
+            sqlite3_errmsg(db));
+    retcode = -1;
+  }
+
+cleanup:
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+  return retcode;
 }
 
 int passc_dirinit(void) {
