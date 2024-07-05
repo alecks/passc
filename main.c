@@ -21,7 +21,7 @@
   "vname INTEGER NOT NULL,"                                                    \
   "FOREIGN KEY (vname) REFERENCES vaults (vname));"
 
-void perr_usage(char *pname) {
+void perr_usage(const char *pname) {
   fprintf(stderr,
           "Usage:\n"
           "  %s [-n vault_name] (add|rm|get) <password name>\n"
@@ -77,7 +77,7 @@ ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
 }
 
 void get_homedir(char *outdir) {
-  char *dir;
+  const char *dir;
   struct passwd *pwd = getpwuid(getuid());
   if (pwd && pwd->pw_dir) {
     dir = pwd->pw_dir;
@@ -91,7 +91,7 @@ void get_homedir(char *outdir) {
   snprintf(outdir, PATH_MAX, "%s", dir);
 }
 
-int gen_new_salt(unsigned char *salt, size_t n, char *filepath) {
+int gen_new_salt(unsigned char *salt, size_t n, const char *filepath) {
   verbosef("v: making new random salt\n");
   randombytes_buf(salt, n);
 
@@ -176,7 +176,7 @@ int gen_vault_derived_key(void) {
   }
 
 cleanup:
-  // sodium_memzero is called before this function fails
+  // sodium_memzero is called even if this fails
   sodium_munlock(passphrase, psize);
   free(passphrase);
 
@@ -349,6 +349,11 @@ cleanup:
   return retcode;
 }
 
+int subcmd_vault_add(const char *_) {
+  printf("unimplemented\n");
+  return 0;
+}
+
 int passc_dirinit(void) {
   char pth[PATH_MAX];
   char homedir[PATH_MAX];
@@ -407,6 +412,10 @@ int main(int argc, char **argv) {
     if (subcmd_vault_list(vault_name) < 0) {
       fprintf(stderr, "couldn't list passwords in vault '%s'\n", vault_name);
       return EXIT_FAILURE;
+    }
+  } else if (strcmp(subcmd, "add") == 0) {
+    if (subcmd_vault_add(vault_name) < 0) {
+      fprintf(stderr, "failed to add to vault\n");
     }
   } else {
     fprintf(stderr, "%s: unknown subcommand '%s'\n", pname, subcmd);
