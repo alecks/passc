@@ -1,4 +1,5 @@
 #include "cwalk.h"
+#include "sodium/crypto_pwhash.h"
 #include <errno.h>
 #include <pwd.h>
 #include <sodium.h>
@@ -296,6 +297,7 @@ int subcmd_vault_list(const char *vname) {
   sqlite3 *db;
   if (make_db(vname, &db) < 0)
     return -1;
+  sqlite3_close(db);
 
   printf("unimplemented\n");
   return 0;
