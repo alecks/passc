@@ -5,7 +5,7 @@
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <strings.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
@@ -24,12 +24,12 @@
 void perr_usage(char *pname) {
   fprintf(stderr,
           "Usage:\n"
-          "  %1$s [-n vault_name] (add|rm|get) <password name>\n"
-          "  %1$s [-n vault_name] ls\n"
+          "  %s [-n vault_name] (add|rm|get) <password name>\n"
+          "  %s [-n vault_name] ls\n"
           "\n"
           "Options:\n"
           "  -v Enable verbose logging.\n",
-          pname);
+          pname, pname); // TODO: use %n$?
 }
 
 int _passc_log_level = 0;
