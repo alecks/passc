@@ -164,7 +164,7 @@ int gen_vault_derived_key(char *outkeyhash) {
     retval = -1;
     goto cleanup;
   }
-  verbosef("v: deriving key from passphrase\n");
+  verbosef("v: deriving key from passphrase...\n");
   if (crypto_pwhash(key, sizeof(key), passphrase, readlen, salt,
                     crypto_pwhash_OPSLIMIT_MODERATE,
                     crypto_pwhash_MEMLIMIT_MODERATE,
@@ -173,12 +173,14 @@ int gen_vault_derived_key(char *outkeyhash) {
     retval = -1;
     goto cleanup;
   }
+  verbosef("v: generated derived key, hashing...\n");
 
   // we now have the key; hash this and store it so that, upon insertion into
   // the vault, we can check if it is the correct passphrase
+  // TODO: make this optional
   if (crypto_pwhash_str(outkeyhash, (const char *const)key, sizeof(key),
-                        crypto_pwhash_OPSLIMIT_MODERATE,
-                        crypto_pwhash_MEMLIMIT_MODERATE) != 0) {
+                        crypto_pwhash_OPSLIMIT_INTERACTIVE,
+                        crypto_pwhash_MEMLIMIT_INTERACTIVE) != 0) {
     fprintf(stderr,
             "gen_vault_derived_key: libsodium failed to hash derived key\n");
     retval = -1;
