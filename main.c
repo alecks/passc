@@ -159,6 +159,7 @@ int gen_vault_derived_key(char *outkeyhash) {
 
   unsigned char salt[crypto_pwhash_SALTBYTES];
   unsigned char key[crypto_secretbox_KEYBYTES];
+  sodium_mlock(key, sizeof(key));
 
   if (find_salt(salt, sizeof(salt)) < 0) {
     retval = -1;
@@ -191,6 +192,7 @@ int gen_vault_derived_key(char *outkeyhash) {
 cleanup:
   // sodium_memzero is called even if this fails
   sodium_munlock(passphrase, psize);
+  sodium_munlock(key, sizeof(key));
   free(passphrase);
 
   return retval;
@@ -373,6 +375,7 @@ int subcmd_vault_add(const char *vname) {
   if (make_db(vname, &db) < 0)
     return -1;
 
+  // TODO: get passphrase, gen key, verify with hash, encrypt and store
   return 0;
 }
 
