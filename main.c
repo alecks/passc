@@ -139,15 +139,39 @@ int find_salt(unsigned char *salt, size_t n) {
   return 1;
 }
 
+// wrapper over crypto_pwhash to reduce no of args
+int derive_key(unsigned char *out, size_t outlen, char *passwd,
+               size_t passwdlen) {
+  unsigned char salt[crypto_pwhash_SALTBYTES];
+  if (find_salt(salt, sizeof(salt)) < 0) {
+    return -1;
+  }
+
+  return crypto_pwhash(
+      out, outlen, passwd, passwdlen, salt, crypto_pwhash_OPSLIMIT_MODERATE,
+      crypto_pwhash_MEMLIMIT_MODERATE, crypto_pwhash_ALG_DEFAULT);
+}
+
+// wrapper over crypto_pwhash_str, casts unsigned char to char
+int hash_derived_key(char *out, const unsigned char *const passwd,
+                     size_t passwdlen) {
+  return crypto_pwhash_str(out, (const char *const)passwd, passwdlen,
+                           crypto_pwhash_OPSLIMIT_INTERACTIVE,
+                           crypto_pwhash_MEMLIMIT_INTERACTIVE);
+}
+
 // derives a new key from passphrase and writes its hash into outkeyhash
 int gen_vault_derived_key(char *outkeyhash) {
   int retval = 0;
+  char *passphrase = NULL;
+  size_t psize = 0;
+
+  unsigned char key[crypto_secretbox_KEYBYTES];
+  sodium_mlock(key, sizeof(key));
+
   printf("KEY CREATION: A key will be derived from your given passphrase.\n"
          "Ensure this is different to those used by other vaults.\n"
          "Enter passphrase: ");
-
-  char *passphrase = NULL;
-  size_t psize = 0;
 
   ssize_t readlen = passc_getpassline(&passphrase, &psize, stdin);
   if (readlen == -1) {
@@ -157,20 +181,9 @@ int gen_vault_derived_key(char *outkeyhash) {
     goto cleanup;
   }
 
-  unsigned char salt[crypto_pwhash_SALTBYTES];
-  unsigned char key[crypto_secretbox_KEYBYTES];
-  sodium_mlock(key, sizeof(key));
-
-  if (find_salt(salt, sizeof(salt)) < 0) {
-    retval = -1;
-    goto cleanup;
-  }
   verbosef("v: deriving key from passphrase...\n");
-  if (crypto_pwhash(key, sizeof(key), passphrase, readlen, salt,
-                    crypto_pwhash_OPSLIMIT_MODERATE,
-                    crypto_pwhash_MEMLIMIT_MODERATE,
-                    crypto_pwhash_ALG_DEFAULT) != 0) {
-    fprintf(stderr, "gen_vault_derived_key: libsodium failed to derive key\n");
+  if (derive_key(key, sizeof(key), passphrase, readlen) != 0) {
+    fprintf(stderr, "gen_vault_derived_key: failed to derive key, OOM?\n");
     retval = -1;
     goto cleanup;
   }
@@ -179,11 +192,9 @@ int gen_vault_derived_key(char *outkeyhash) {
   // we now have the key; hash this and store it so that, upon insertion into
   // the vault, we can check if it is the correct passphrase
   // TODO: make this optional
-  if (crypto_pwhash_str(outkeyhash, (const char *const)key, sizeof(key),
-                        crypto_pwhash_OPSLIMIT_INTERACTIVE,
-                        crypto_pwhash_MEMLIMIT_INTERACTIVE) != 0) {
+  if (hash_derived_key(outkeyhash, key, sizeof(key)) != 0) {
     fprintf(stderr,
-            "gen_vault_derived_key: libsodium failed to hash derived key\n");
+            "gen_vault_derived_key: failed to hash derived key, OOM?\n");
     retval = -1;
     goto cleanup;
   }
@@ -375,8 +386,37 @@ int subcmd_vault_add(const char *vname) {
   if (make_db(vname, &db) < 0)
     return -1;
 
-  // TODO: get passphrase, gen key, verify with hash, encrypt and store
-  return 0;
+  unsigned char key[crypto_secretbox_KEYBYTES];
+  sodium_mlock(key, sizeof(key));
+
+  int retval = 0;
+  char *passphrase = NULL;
+  size_t psize = 0;
+
+  printf("Enter passphrase for vault '%s': ", vname);
+  ssize_t readlen = passc_getpassline(&passphrase, &psize, stdin);
+  if (readlen == -1) {
+    fprintf(stderr, "subcmd_vault_add: could not read passphrase from stdin\n");
+    retval = -1;
+    goto cleanup;
+  }
+
+  if (derive_key(key, sizeof(key), passphrase, readlen) != 0) {
+    fprintf(stderr, "subcmd_vault_add: failed to derive key, OOM?\n");
+    retval = -1;
+    goto cleanup;
+  }
+  verbosef("v: key has been derived\n");
+
+  // TODO: compare this with hash from db, encrypt, store ciphertext
+
+cleanup:
+  sodium_munlock(passphrase, psize);
+  free(passphrase);
+  sodium_munlock(key, sizeof(key));
+
+  sqlite3_close(db);
+  return retval;
 }
 
 int passc_dirinit(void) {
