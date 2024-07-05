@@ -13,7 +13,7 @@
 #define MIGRATION_QUERY                                                        \
   "PRAGMA foreign_keys = ON;"                                                  \
   "CREATE TABLE IF NOT EXISTS vaults"                                          \
-  "(vname TEXT PRIMARY KEY);"                                                  \
+  "(vname TEXT PRIMARY KEY, keyhash TEXT NOT NULL);"                           \
   "CREATE TABLE IF NOT EXISTS passwords ("                                     \
   "pname TEXT PRIMARY KEY,"                                                    \
   "ref TEXT NOT NULL,"                                                         \
@@ -139,8 +139,8 @@ int find_salt(unsigned char *salt, size_t n) {
   return 1;
 }
 
-// creates a new derived key from user passphrase
-int gen_vault_derived_key(void) {
+// derives a new key from passphrase and writes its hash into outkeyhash
+int gen_vault_derived_key(char *outkeyhash) {
   int retval = 0;
   printf("KEY CREATION: A key will be derived from your given passphrase.\n"
          "Ensure this is different to those used by other vaults.\n"
@@ -169,11 +169,22 @@ int gen_vault_derived_key(void) {
                     crypto_pwhash_OPSLIMIT_MODERATE,
                     crypto_pwhash_MEMLIMIT_MODERATE,
                     crypto_pwhash_ALG_DEFAULT) != 0) {
-    fprintf(stderr,
-            "gen_vault_derived_key: libsodium reported out of memory\n");
+    fprintf(stderr, "gen_vault_derived_key: libsodium failed to derive key\n");
     retval = -1;
     goto cleanup;
   }
+
+  // we now have the key; hash this and store it so that, upon insertion into
+  // the vault, we can check if it is the correct passphrase
+  if (crypto_pwhash_str(outkeyhash, (const char *const)key, sizeof(key),
+                        crypto_pwhash_OPSLIMIT_MODERATE,
+                        crypto_pwhash_MEMLIMIT_MODERATE) != 0) {
+    fprintf(stderr,
+            "gen_vault_derived_key: libsodium failed to hash derived key\n");
+    retval = -1;
+    goto cleanup;
+  }
+  verbosef("v: derived key has been hashed\n");
 
 cleanup:
   // sodium_memzero is called even if this fails
@@ -220,11 +231,12 @@ int db_init(const char *filename, sqlite3 **outhdl) {
 int db_vault_create(sqlite3 *db, const char *vname) {
   sqlite3_stmt *stmt;
 
-  if (gen_vault_derived_key() < 0)
+  char keyhash[crypto_pwhash_STRBYTES];
+  if (gen_vault_derived_key(keyhash) < 0)
     return -1;
 
-  char *queryt =
-      sqlite3_mprintf("INSERT INTO vaults (vname) VALUES (%Q)", vname);
+  char *queryt = sqlite3_mprintf(
+      "INSERT INTO vaults (vname, keyhash) VALUES (%Q, %Q)", vname, keyhash);
   int rc = sqlite3_prepare(db, queryt, -1, &stmt, NULL);
   sqlite3_free(queryt);
 
@@ -286,14 +298,19 @@ cleanup:
 }
 
 // main function used for creating a db handle. runs db_init and
-// db_vault_init. callers responsibility to sqlite3_close.
+// db_vault_init. callers responsibility to sqlite3_close if retval is 0
 int make_db(const char *vname, sqlite3 **outhdl) {
   sqlite3 *db;
   if (db_init("passc.db", &db) < 0)
     return -1;
 
+  if (db_vault_init(db, vname) < 0) {
+    sqlite3_close(db);
+    return -1;
+  }
+
   *outhdl = db;
-  return db_vault_init(db, vname);
+  return 0;
 }
 
 int subcmd_vault_list(const char *vname) {
@@ -349,8 +366,11 @@ cleanup:
   return retcode;
 }
 
-int subcmd_vault_add(const char *_) {
-  printf("unimplemented\n");
+int subcmd_vault_add(const char *vname) {
+  sqlite3 *db;
+  if (make_db(vname, &db) < 0)
+    return -1;
+
   return 0;
 }
 
