@@ -352,8 +352,7 @@ int subcmd_vault_list(const char *vname) {
   while (rc == SQLITE_ROW) {
     int nocols = sqlite3_column_count(stmt);
 
-    // we could reduce the amount of printfs here, but the code would become
-    // messy due to risk of buffer overflows
+    // could use strcat here, probably not worth it for now
     for (int i = 0; i < nocols; i++) {
       printf("%s ", sqlite3_column_text(stmt, i));
       if (i != nocols - 1) {
@@ -364,12 +363,8 @@ int subcmd_vault_list(const char *vname) {
 
     rc = sqlite3_step(stmt);
   }
-  switch (rc) {
-  case SQLITE_DONE:
-    printf("end of vault\n");
-    retcode = 0;
-    break;
-  default:
+
+  if (rc != SQLITE_DONE) {
     fprintf(stderr, "subcmd_vault_list: failed to advance query: %s\n",
             sqlite3_errmsg(db));
     retcode = -1;
@@ -444,6 +439,7 @@ int main(int argc, char **argv) {
 
   const char *vault_name = NULL;
 
+  // OPTION MATCHING
   int opt;
   while ((opt = getopt(argc, argv, "vn::")) != -1) {
     switch (opt) {
@@ -462,10 +458,10 @@ int main(int argc, char **argv) {
   if (!vault_name)
     vault_name = "main";
 
-  // this is after getopt; contains verbose logging
   if (passc_dirinit() != 0)
     return EXIT_FAILURE;
 
+  // SUBCOMMAND MATCHING
   if (optind >= argc) {
     fprintf(stderr, "%s: expected subcommand\n", pname);
     perr_usage(pname);
