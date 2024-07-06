@@ -34,6 +34,7 @@ void perr_usage(const char *pname) {
 
 int _passc_log_level = 0;
 
+// verbose format logging if _passc_log_level is >= 1
 void verbosef(const char *format, ...) {
   if (_passc_log_level < 1)
     return;
@@ -45,8 +46,8 @@ void verbosef(const char *format, ...) {
   va_end(args);
 }
 
-// adapted from gnu getpass. this does NOT retain \n. locks memory with
-// sodium_mlock; callers responsibility to sodium_munlock and free.
+// this does NOT retain \n. locks memory with sodium_mlock; callers
+// responsibility to sodium_munlock and free. returns -1 on error, 0 on ok
 ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
   struct termios old, new;
   int nread;
@@ -76,7 +77,9 @@ ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
   return nread;
 }
 
-void get_homedir(char *outdir) {
+// tries to get the homedir from passwd entry, otherwise $HOME, otherwise cwd.
+// expects out to be able to fit PATH_MAX
+void get_homedir(char *out) {
   const char *dir;
   struct passwd *pwd = getpwuid(getuid());
   if (pwd && pwd->pw_dir) {
@@ -88,7 +91,7 @@ void get_homedir(char *outdir) {
   if (!dir) {
     dir = ".";
   }
-  snprintf(outdir, PATH_MAX, "%s", dir);
+  snprintf(out, PATH_MAX, "%s", dir);
 }
 
 int gen_new_salt(unsigned char *salt, size_t n, const char *filepath) {
@@ -161,8 +164,9 @@ int hash_derived_key(char *out, const unsigned char *const passwd,
 }
 
 // derives a new key from passphrase and writes its hash into outkeyhash
+// returns 0 if ok, -1 on error
 int gen_vault_derived_key(char *outkeyhash) {
-  int retval = 0;
+  int retcode = 0;
   char *passphrase = NULL;
   size_t psize = 0;
 
@@ -177,14 +181,14 @@ int gen_vault_derived_key(char *outkeyhash) {
   if (readlen == -1) {
     fprintf(stderr,
             "gen_vault_derived_key: could not read passphrase from stdin\n");
-    retval = -1;
+    retcode = -1;
     goto cleanup;
   }
 
   verbosef("v: deriving key from passphrase...\n");
   if (derive_key(key, sizeof(key), passphrase, readlen) != 0) {
     fprintf(stderr, "gen_vault_derived_key: failed to derive key, OOM?\n");
-    retval = -1;
+    retcode = -1;
     goto cleanup;
   }
   verbosef("v: generated derived key, hashing...\n");
@@ -195,7 +199,7 @@ int gen_vault_derived_key(char *outkeyhash) {
   if (hash_derived_key(outkeyhash, key, sizeof(key)) != 0) {
     fprintf(stderr,
             "gen_vault_derived_key: failed to hash derived key, OOM?\n");
-    retval = -1;
+    retcode = -1;
     goto cleanup;
   }
   verbosef("v: derived key has been hashed\n");
@@ -206,9 +210,10 @@ cleanup:
   sodium_munlock(key, sizeof(key));
   free(passphrase);
 
-  return retval;
+  return retcode;
 }
 
+// migrates the database using MIGRATION_QUERY; returns 0 if ok, -1 on error
 int db_migrate_up(sqlite3 *db) {
   char *errmsg = NULL;
   sqlite3_exec(db, MIGRATION_QUERY, NULL, NULL, &errmsg);
@@ -242,7 +247,7 @@ int db_init(const char *filename, sqlite3 **outhdl) {
   return db_migrate_up(db);
 }
 
-// creates a new vault. returns 0 if successful, otherwise negative.
+// creates a new vault. returns 0 if ok, -1 on error.
 int db_vault_create(sqlite3 *db, const char *vname) {
   sqlite3_stmt *stmt;
 
@@ -262,21 +267,22 @@ int db_vault_create(sqlite3 *db, const char *vname) {
     return -1;
   }
 
-  int res = 0;
+  int retcode;
   if (sqlite3_step(stmt) == SQLITE_DONE) {
     printf("Created new vault: %s\n", vname);
+    retcode = 0;
   } else {
     fprintf(stderr, "db_vault_create: failed to advance query: %s\n",
             sqlite3_errmsg(db));
-    res = -1;
+    retcode = -1;
   }
 
   sqlite3_finalize(stmt);
-  return res;
+  return retcode;
 }
 
 // checks if a vault exists, creates if it doesn't. returns 1 if already exists,
-// 0 on create, negative if error.
+// 0 on create, -1 on error.
 int db_vault_init(sqlite3 *db, const char *vname) {
   int retcode = 0;
 
@@ -313,7 +319,7 @@ cleanup:
 }
 
 // main function used for creating a db handle. runs db_init and
-// db_vault_init. callers responsibility to sqlite3_close if retval is 0
+// db_vault_init. callers responsibility to sqlite3_close if 0 returned (ok)
 int make_db(const char *vname, sqlite3 **outhdl) {
   sqlite3 *db;
   if (db_init("passc.db", &db) < 0)
@@ -328,6 +334,7 @@ int make_db(const char *vname, sqlite3 **outhdl) {
   return 0;
 }
 
+// prints refs and pnames to stdout; returns 0 if ok, -1 on error
 int subcmd_vault_list(const char *vname) {
   int retcode = 0;
 
@@ -376,6 +383,8 @@ cleanup:
   return retcode;
 }
 
+// selects the keyhash from the db, used to verify passphrases. returns -1 on
+// error, -2 if not found, 0 if ok
 int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
   sqlite3_stmt *stmt;
   char *queryt =
@@ -393,7 +402,7 @@ int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
   if (sqlite3_step(stmt) != SQLITE_ROW) {
     fprintf(stderr, "db_get_keyhash: query for keyhash returned no rows\n");
     sqlite3_finalize(stmt);
-    return -1;
+    return -2;
   }
 
   strcpy(out, (const char *)sqlite3_column_text(stmt, 0));
@@ -413,7 +422,7 @@ int subcmd_vault_add(const char *vname) {
   unsigned char key[crypto_secretbox_KEYBYTES];
   sodium_mlock(key, sizeof(key));
 
-  int retval = 0;
+  int retcode = 0;
   char *passphrase = NULL;
   size_t psize = 0;
 
@@ -421,13 +430,13 @@ int subcmd_vault_add(const char *vname) {
   ssize_t readlen = passc_getpassline(&passphrase, &psize, stdin);
   if (readlen == -1) {
     fprintf(stderr, "subcmd_vault_add: could not read passphrase from stdin\n");
-    retval = -1;
+    retcode = -1;
     goto cleanup;
   }
 
   if (derive_key(key, sizeof(key), passphrase, readlen) != 0) {
     fprintf(stderr, "subcmd_vault_add: failed to derive key, OOM?\n");
-    retval = -1;
+    retcode = -1;
     goto cleanup;
   }
   verbosef("v: key has been derived\n");
@@ -435,14 +444,14 @@ int subcmd_vault_add(const char *vname) {
   // TODO: compare this with hash from db, encrypt, store ciphertext
   char keyhash[crypto_pwhash_STRBYTES];
   if (db_get_keyhash(keyhash, db, vname) < 0) {
-    retval = -1;
+    retcode = -1;
     goto cleanup;
   }
 
   if (crypto_pwhash_str_verify(keyhash, (const char *const)key, sizeof(key)) !=
       0) {
     fprintf(stderr, "invalid password for vault\n");
-    retval = -2;
+    retcode = -2;
     goto cleanup;
   }
 
@@ -455,9 +464,11 @@ cleanup:
   sodium_munlock(key, sizeof(key));
 
   sqlite3_close(db);
-  return retval;
+  return retcode;
 }
 
+// runs mkdir for the homedir/.passc directory. uses get_homedir; cwd will be
+// used instead if unavailable. -1 on error, 0 if ok
 int passc_dirinit(void) {
   char pth[PATH_MAX];
   char homedir[PATH_MAX];
