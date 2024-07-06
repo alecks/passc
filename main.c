@@ -50,7 +50,6 @@ void verbosef(const char *format, ...) {
 // responsibility to sodium_munlock and free. returns -1 on error, 0 on ok
 ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
   struct termios old, new;
-  int nread;
 
   if (tcgetattr(fileno(stream), &old) != 0)
     return -1;
@@ -60,7 +59,7 @@ ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
   if (tcsetattr(fileno(stream), TCSAFLUSH, &new) != 0)
     return -1;
 
-  nread = getline(lineptr, n, stream);
+  int nread = getline(lineptr, n, stream);
   if (nread > 0) {
     (*lineptr)[--nread] = '\0'; // replace \n
   }
@@ -80,7 +79,7 @@ ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
 // tries to get the homedir from passwd entry, otherwise $HOME, otherwise cwd.
 // expects out to be able to fit PATH_MAX
 void get_homedir(char *out) {
-  const char *dir;
+  const char *dir = NULL;
   struct passwd *pwd = getpwuid(getuid());
   if (pwd && pwd->pw_dir) {
     dir = pwd->pw_dir;
@@ -202,25 +201,28 @@ cleanup:
 // same as derivekey_getpassline, except discards the key and returns the hash
 // of the key instead. 0 if ok, -1 on error.
 int keyhash_getpassline(char *outkeyhash) {
+  int retcode = 0;
   unsigned char key[crypto_secretbox_KEYBYTES];
   sodium_mlock(key, sizeof(key));
 
   if (derivekey_getpassline(key, sizeof(key)) < 0) {
-    sodium_munlock(key, sizeof(key));
-    return -1;
+    retcode = -1;
+    goto cleanup;
   }
 
   // we now have the key; hash this and store it so that, upon insertion into
   // the vault, we can check if it is the correct passphrase
   if (hash_derived_key(outkeyhash, key, sizeof(key)) != 0) {
     fprintf(stderr, "keyhash_getpassline: failed to hash derived key, OOM?\n");
-    sodium_munlock(key, sizeof(key));
-    return -1;
+    retcode = -1;
+    goto cleanup;
   }
 
   verbosef("v: derived key has been hashed\n");
+
+cleanup:
   sodium_munlock(key, sizeof(key));
-  return 0;
+  return retcode;
 }
 
 // migrates the database using MIGRATION_QUERY; returns 0 if ok, -1 on error.
@@ -243,7 +245,7 @@ int db_migrate_up(sqlite3 *db) {
 // opens the db and migrates up. callers responsibility to run
 // sqlite3_close, unless return value is <0.
 int db_init(const char *filename, sqlite3 **outhdl) {
-  sqlite3 *db;
+  sqlite3 *db = NULL;
   int rc = sqlite3_open_v2(filename, &db,
                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
   if (rc != SQLITE_OK) {
@@ -260,6 +262,7 @@ int db_init(const char *filename, sqlite3 **outhdl) {
 
 // creates a new vault. returns 0 if ok, -1 on error.
 int db_vault_create(sqlite3 *db, const char *vname) {
+  int retcode = 0;
   char keyhash[crypto_pwhash_STRBYTES];
 
   printf("KEY CREATION: A key will be derived from your given passphrase.\n"
@@ -267,8 +270,7 @@ int db_vault_create(sqlite3 *db, const char *vname) {
   if (keyhash_getpassline(keyhash) < 0)
     return -1;
 
-  int retcode = 0;
-  sqlite3_stmt *stmt;
+  sqlite3_stmt *stmt = NULL;
   char *queryt = sqlite3_mprintf(
       "INSERT INTO vaults (vname, keyhash) VALUES (%Q, %Q)", vname, keyhash);
 
@@ -292,7 +294,7 @@ cleanup:
 // checks if a vault exists, creates if it doesn't. returns 1 if already exists,
 // 0 on create, -1 on error.
 int db_vault_init(sqlite3 *db, const char *vname) {
-  sqlite3_stmt *stmt;
+  sqlite3_stmt *stmt = NULL;
   char *queryt =
       sqlite3_mprintf("SELECT 1 FROM vaults WHERE vname = %Q", vname);
 
@@ -328,7 +330,7 @@ int db_vault_init(sqlite3 *db, const char *vname) {
 // main function used for creating a db handle. runs db_init and
 // db_vault_init. callers responsibility to sqlite3_close if 0 returned (ok)
 int make_db(const char *vname, sqlite3 **outhdl) {
-  sqlite3 *db;
+  sqlite3 *db = NULL;
   if (db_init("passc.db", &db) < 0)
     return -1;
 
@@ -345,11 +347,11 @@ int make_db(const char *vname, sqlite3 **outhdl) {
 int subcmd_vault_list(const char *vname) {
   int retcode = 0;
 
-  sqlite3 *db;
+  sqlite3 *db = NULL;
   if (make_db(vname, &db) < 0)
     return -1;
 
-  sqlite3_stmt *stmt;
+  sqlite3_stmt *stmt = NULL;
   char *queryt = sqlite3_mprintf(
       "SELECT pname, ref FROM passwords WHERE vname = %Q", vname);
 
@@ -396,7 +398,7 @@ cleanup_db:
 int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
   int retcode = 0;
 
-  sqlite3_stmt *stmt;
+  sqlite3_stmt *stmt = NULL;
   char *queryt =
       sqlite3_mprintf("SELECT keyhash FROM vaults WHERE vname = %Q", vname);
 
@@ -438,7 +440,7 @@ int vault_authorise(sqlite3 *dbhdl, unsigned char *key, size_t keysize,
 // subcommand to add a new password to a vault. returns 0 if ok, -1 on error, -2
 // on invalid password.
 int subcmd_vault_add(const char *vname) {
-  sqlite3 *db;
+  sqlite3 *db = NULL;
   if (make_db(vname, &db) < 0)
     return -1;
 
