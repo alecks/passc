@@ -95,6 +95,8 @@ void get_homedir(char *out) {
 }
 
 int gen_new_salt(unsigned char *salt, size_t n, const char *filepath) {
+  int retcode = 0;
+
   verbosef("v: making new random salt\n");
   randombytes_buf(salt, n);
 
@@ -104,17 +106,20 @@ int gen_new_salt(unsigned char *salt, size_t n, const char *filepath) {
     return -1;
   }
   if (fwrite(salt, 1, n, fp) != n) {
-    fclose(fp);
     fprintf(stderr, "gen_new_salt: unexpected num of bytes written\n");
-    return -1;
+    retcode = -1;
+    goto cleanup;
   }
 
-  fclose(fp);
   verbosef("v: new salt has been written at %s\n", filepath);
-  return 0;
+
+cleanup:
+  fclose(fp);
+  return retcode;
 }
 
 int find_salt(unsigned char *salt, size_t n) {
+  int retcode = 0;
   char homedir[PATH_MAX];
   char filepath[PATH_MAX];
 
@@ -129,17 +134,20 @@ int find_salt(unsigned char *salt, size_t n) {
   size_t readlen = fread(salt, 1, n, fp);
   if (ferror(fp) != 0) {
     perror("find_salt: failed to read salt file");
-    fclose(fp);
-    return -1;
+    retcode = -1;
+    goto cleanup;
   } else if (readlen != n) {
-    fprintf(stderr, "find_salt: read less bytes than required from salt file");
-    fclose(fp);
-    return -1;
+    fprintf(stderr,
+            "find_salt: read less bytes than required from salt file\n");
+    retcode = -1;
+    goto cleanup;
   }
 
-  fclose(fp);
   verbosef("v: using found salt file\n");
-  return 1;
+
+cleanup:
+  fclose(fp);
+  return retcode;
 }
 
 // wrapper over crypto_pwhash using the salt
@@ -165,6 +173,7 @@ int hash_derived_key(char *out, const unsigned char *const passwd,
 
 // reads a passphrase from stdin and derives a key from it; 0 if ok, -1 on error
 int derivekey_getpassline(unsigned char *key, size_t keysize) {
+  int retcode = 0;
   char *passphrase = NULL;
   size_t psize = 0;
 
@@ -172,22 +181,22 @@ int derivekey_getpassline(unsigned char *key, size_t keysize) {
   ssize_t readlen = passc_getpassline(&passphrase, &psize, stdin);
   if (readlen == -1) {
     fprintf(stderr, "hash_getpassline: could not read passphrase from stdin\n");
-    sodium_munlock(passphrase, psize);
-    free(passphrase);
-    return -1;
+    retcode = -1;
+    goto cleanup;
   }
 
   if (derive_key(key, keysize, passphrase, readlen) != 0) {
     fprintf(stderr, "hash_getpassline: failed to derive key, OOM?\n");
-    sodium_munlock(passphrase, psize);
-    free(passphrase);
-    return -1;
+    retcode = -1;
+    goto cleanup;
   }
 
+  verbosef("v: key has been derived\n");
+
+cleanup:
   sodium_munlock(passphrase, psize);
   free(passphrase);
-  verbosef("v: key has been derived\n");
-  return 0;
+  return retcode;
 }
 
 // same as derivekey_getpassline, except discards the key and returns the hash
@@ -214,7 +223,8 @@ int keyhash_getpassline(char *outkeyhash) {
   return 0;
 }
 
-// migrates the database using MIGRATION_QUERY; returns 0 if ok, -1 on error
+// migrates the database using MIGRATION_QUERY; returns 0 if ok, -1 on error.
+// closes db on error.
 int db_migrate_up(sqlite3 *db) {
   char *errmsg = NULL;
   sqlite3_exec(db, MIGRATION_QUERY, NULL, NULL, &errmsg);
@@ -250,37 +260,31 @@ int db_init(const char *filename, sqlite3 **outhdl) {
 
 // creates a new vault. returns 0 if ok, -1 on error.
 int db_vault_create(sqlite3 *db, const char *vname) {
-  sqlite3_stmt *stmt;
+  char keyhash[crypto_pwhash_STRBYTES];
 
   printf("KEY CREATION: A key will be derived from your given passphrase.\n"
          "Ensure this is different to those used by other vaults.\n");
-
-  char keyhash[crypto_pwhash_STRBYTES];
   if (keyhash_getpassline(keyhash) < 0)
     return -1;
 
+  int retcode = 0;
+  sqlite3_stmt *stmt;
   char *queryt = sqlite3_mprintf(
       "INSERT INTO vaults (vname, keyhash) VALUES (%Q, %Q)", vname, keyhash);
-  int rc = sqlite3_prepare(db, queryt, -1, &stmt, NULL);
-  sqlite3_free(queryt);
 
-  if (rc != SQLITE_OK) {
-    fprintf(stderr, "db_vault_create: could not prepare query: %s\n",
+  if (sqlite3_prepare(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
+      sqlite3_step(stmt) != SQLITE_DONE) {
+    fprintf(stderr, "db_vault_create: couldn't insert vault: %s\n",
             sqlite3_errmsg(db));
-    sqlite3_finalize(stmt);
-    return -1;
-  }
 
-  int retcode;
-  if (sqlite3_step(stmt) == SQLITE_DONE) {
-    printf("Created new vault: %s\n", vname);
-    retcode = 0;
-  } else {
-    fprintf(stderr, "db_vault_create: failed to advance query: %s\n",
-            sqlite3_errmsg(db));
     retcode = -1;
+    goto cleanup;
   }
 
+  printf("Created new vault: %s\n", vname);
+
+cleanup:
+  sqlite3_free(queryt);
   sqlite3_finalize(stmt);
   return retcode;
 }
@@ -288,20 +292,20 @@ int db_vault_create(sqlite3 *db, const char *vname) {
 // checks if a vault exists, creates if it doesn't. returns 1 if already exists,
 // 0 on create, -1 on error.
 int db_vault_init(sqlite3 *db, const char *vname) {
-  int retcode = 0;
-
   sqlite3_stmt *stmt;
   char *queryt =
       sqlite3_mprintf("SELECT 1 FROM vaults WHERE vname = %Q", vname);
-  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
+    fprintf(stderr, "db_vault_init: could not prepare query: %s\n",
+            sqlite3_errmsg(db));
+
+    sqlite3_free(queryt);
+    return -1;
+  }
   sqlite3_free(queryt);
 
-  if (rc != SQLITE_OK) {
-    fprintf(stderr, "could not prepare query: %s\n", sqlite3_errmsg(db));
-    retcode = -1;
-    goto cleanup;
-  }
-
+  int retcode;
   switch (sqlite3_step(stmt)) {
   case SQLITE_DONE:
     printf("vault '%s' does not exist. creating...\n", vname);
@@ -317,7 +321,6 @@ int db_vault_init(sqlite3 *db, const char *vname) {
     retcode = -1;
   }
 
-cleanup:
   sqlite3_finalize(stmt);
   return retcode;
 }
@@ -349,17 +352,18 @@ int subcmd_vault_list(const char *vname) {
   sqlite3_stmt *stmt;
   char *queryt = sqlite3_mprintf(
       "SELECT pname, ref FROM passwords WHERE vname = %Q", vname);
-  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
-  sqlite3_free(queryt);
 
-  if (rc != SQLITE_OK) {
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
     fprintf(stderr, "subcmd_vault_list: couldn't prepare query: %s\n",
             sqlite3_errmsg(db));
-    retcode = -1;
-    goto cleanup;
-  }
 
-  rc = sqlite3_step(stmt);
+    sqlite3_free(queryt);
+    retcode = -1;
+    goto cleanup_db;
+  }
+  sqlite3_free(queryt);
+
+  int rc = sqlite3_step(stmt);
   while (rc == SQLITE_ROW) {
     int nocols = sqlite3_column_count(stmt);
 
@@ -381,39 +385,36 @@ int subcmd_vault_list(const char *vname) {
     retcode = -1;
   }
 
-cleanup:
   sqlite3_finalize(stmt);
+cleanup_db:
   sqlite3_close(db);
   return retcode;
 }
 
-// selects the keyhash from the db, used to verify passphrases. returns -1 on
-// error, -2 if not found, 0 if ok
+// selects the keyhash from the db, used to verify passphrases. returns 0 if ok,
+// -1 on error
 int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
+  int retcode = 0;
+
   sqlite3_stmt *stmt;
   char *queryt =
       sqlite3_mprintf("SELECT keyhash FROM vaults WHERE vname = %Q", vname);
 
-  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
-  sqlite3_free(queryt);
-  if (rc != SQLITE_OK) {
-    fprintf(stderr, "db_get_keyhash: failed to prepare query: %s\n",
-            sqlite3_errmsg(db));
-    sqlite3_finalize(stmt);
-    return -1;
-  }
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
+      sqlite3_step(stmt) != SQLITE_ROW) {
+    fprintf(stderr, "failed to select keyhash: %s\n", sqlite3_errmsg(db));
 
-  if (sqlite3_step(stmt) != SQLITE_ROW) {
-    fprintf(stderr, "db_get_keyhash: query for keyhash returned no rows\n");
-    sqlite3_finalize(stmt);
-    return -2;
+    retcode = -1;
+    goto cleanup;
   }
 
   strcpy(out, (const char *)sqlite3_column_text(stmt, 0));
   verbosef("v: found existing keyhash\n");
 
+cleanup:
+  sqlite3_free(queryt);
   sqlite3_finalize(stmt);
-  return 0;
+  return retcode;
 }
 
 // asks user for passphrase, derives key and verifies this against the db. key
