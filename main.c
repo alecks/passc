@@ -416,6 +416,24 @@ int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
   return 0;
 }
 
+// asks user for passphrase, derives key and verifies this against the db. key
+// is written to key param. returns -1 on error, -2 if unauthorised, 0 if ok.
+int vault_authorise(sqlite3 *dbhdl, unsigned char *key, size_t keysize,
+                    const char *vname) {
+  char dbhash[crypto_pwhash_STRBYTES];
+
+  if (derivekey_getpassline(key, keysize) < 0 ||
+      db_get_keyhash(dbhash, dbhdl, vname) < 0) {
+    return -1;
+  }
+
+  if (crypto_pwhash_str_verify(dbhash, (const char *const)key, keysize) != 0) {
+    return -2;
+  }
+  // ok
+  return 0;
+}
+
 // subcommand to add a new password to a vault. returns 0 if ok, -1 on error, -2
 // on invalid password.
 int subcmd_vault_add(const char *vname) {
@@ -424,32 +442,17 @@ int subcmd_vault_add(const char *vname) {
     return -1;
 
   unsigned char key[crypto_secretbox_KEYBYTES];
-  char dbhash[crypto_pwhash_STRBYTES];
   sodium_mlock(key, sizeof(key));
 
-  if (derivekey_getpassline(key, sizeof(key)) < 0) {
-    sodium_munlock(key, sizeof(key));
-    sqlite3_close(db);
+  switch (vault_authorise(db, key, sizeof(key), vname)) {
+  case -1:
     return -1;
-  }
-
-  if (db_get_keyhash(dbhash, db, vname) < 0) {
-    sodium_munlock(key, sizeof(key));
-    sqlite3_close(db);
+  case -2:
+    fprintf(stderr, "incorrect passphrase for '%s', unauthorised\n", vname);
     return -1;
-  }
-
-  if (crypto_pwhash_str_verify(dbhash, (const char *const)key, sizeof(key)) !=
-      0) {
-    fprintf(stderr, "incorrect passphrase for '%s'\n", vname);
-
-    sodium_munlock(key, sizeof(key));
-    sqlite3_close(db);
-    return -2;
   }
 
   printf("ok\n");
-  // TODO: receive password, ref and pname, encrypt, insert
   return 0;
 }
 
