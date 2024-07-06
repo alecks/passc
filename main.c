@@ -142,7 +142,7 @@ int find_salt(unsigned char *salt, size_t n) {
   return 1;
 }
 
-// wrapper over crypto_pwhash to reduce no of args
+// wrapper over crypto_pwhash using the salt
 int derive_key(unsigned char *out, size_t outlen, char *passwd,
                size_t passwdlen) {
   unsigned char salt[crypto_pwhash_SALTBYTES];
@@ -163,54 +163,55 @@ int hash_derived_key(char *out, const unsigned char *const passwd,
                            crypto_pwhash_MEMLIMIT_INTERACTIVE);
 }
 
-// derives a new key from passphrase and writes its hash into outkeyhash
-// returns 0 if ok, -1 on error
-int gen_vault_derived_key(char *outkeyhash) {
-  int retcode = 0;
+// reads a passphrase from stdin and derives a key from it; 0 if ok, -1 on error
+int derivekey_getpassline(unsigned char *key, size_t keysize) {
   char *passphrase = NULL;
   size_t psize = 0;
 
+  printf("Enter passphrase for vault: ");
+  ssize_t readlen = passc_getpassline(&passphrase, &psize, stdin);
+  if (readlen == -1) {
+    fprintf(stderr, "hash_getpassline: could not read passphrase from stdin\n");
+    sodium_munlock(passphrase, psize);
+    free(passphrase);
+    return -1;
+  }
+
+  if (derive_key(key, keysize, passphrase, readlen) != 0) {
+    fprintf(stderr, "hash_getpassline: failed to derive key, OOM?\n");
+    sodium_munlock(passphrase, psize);
+    free(passphrase);
+    return -1;
+  }
+
+  sodium_munlock(passphrase, psize);
+  free(passphrase);
+  verbosef("v: key has been derived\n");
+  return 0;
+}
+
+// same as derivekey_getpassline, except discards the key and returns the hash
+// of the key instead. 0 if ok, -1 on error.
+int keyhash_getpassline(char *outkeyhash) {
   unsigned char key[crypto_secretbox_KEYBYTES];
   sodium_mlock(key, sizeof(key));
 
-  printf("KEY CREATION: A key will be derived from your given passphrase.\n"
-         "Ensure this is different to those used by other vaults.\n"
-         "Enter passphrase: ");
-
-  ssize_t readlen = passc_getpassline(&passphrase, &psize, stdin);
-  if (readlen == -1) {
-    fprintf(stderr,
-            "gen_vault_derived_key: could not read passphrase from stdin\n");
-    retcode = -1;
-    goto cleanup;
+  if (derivekey_getpassline(key, sizeof(key)) < 0) {
+    sodium_munlock(key, sizeof(key));
+    return -1;
   }
-
-  verbosef("v: deriving key from passphrase...\n");
-  if (derive_key(key, sizeof(key), passphrase, readlen) != 0) {
-    fprintf(stderr, "gen_vault_derived_key: failed to derive key, OOM?\n");
-    retcode = -1;
-    goto cleanup;
-  }
-  verbosef("v: generated derived key, hashing...\n");
 
   // we now have the key; hash this and store it so that, upon insertion into
   // the vault, we can check if it is the correct passphrase
-  // TODO: make this optional
   if (hash_derived_key(outkeyhash, key, sizeof(key)) != 0) {
-    fprintf(stderr,
-            "gen_vault_derived_key: failed to hash derived key, OOM?\n");
-    retcode = -1;
-    goto cleanup;
+    fprintf(stderr, "keyhash_getpassline: failed to hash derived key, OOM?\n");
+    sodium_munlock(key, sizeof(key));
+    return -1;
   }
+
   verbosef("v: derived key has been hashed\n");
-
-cleanup:
-  // sodium_memzero is called even if this fails
-  sodium_munlock(passphrase, psize);
   sodium_munlock(key, sizeof(key));
-  free(passphrase);
-
-  return retcode;
+  return 0;
 }
 
 // migrates the database using MIGRATION_QUERY; returns 0 if ok, -1 on error
@@ -251,8 +252,11 @@ int db_init(const char *filename, sqlite3 **outhdl) {
 int db_vault_create(sqlite3 *db, const char *vname) {
   sqlite3_stmt *stmt;
 
+  printf("KEY CREATION: A key will be derived from your given passphrase.\n"
+         "Ensure this is different to those used by other vaults.\n");
+
   char keyhash[crypto_pwhash_STRBYTES];
-  if (gen_vault_derived_key(keyhash) < 0)
+  if (keyhash_getpassline(keyhash) < 0)
     return -1;
 
   char *queryt = sqlite3_mprintf(
@@ -406,7 +410,7 @@ int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
   }
 
   strcpy(out, (const char *)sqlite3_column_text(stmt, 0));
-  verbosef("found existing keyhash\n");
+  verbosef("v: found existing keyhash\n");
 
   sqlite3_finalize(stmt);
   return 0;
@@ -420,51 +424,33 @@ int subcmd_vault_add(const char *vname) {
     return -1;
 
   unsigned char key[crypto_secretbox_KEYBYTES];
+  char dbhash[crypto_pwhash_STRBYTES];
   sodium_mlock(key, sizeof(key));
 
-  int retcode = 0;
-  char *passphrase = NULL;
-  size_t psize = 0;
-
-  printf("Enter passphrase for vault '%s': ", vname);
-  ssize_t readlen = passc_getpassline(&passphrase, &psize, stdin);
-  if (readlen == -1) {
-    fprintf(stderr, "subcmd_vault_add: could not read passphrase from stdin\n");
-    retcode = -1;
-    goto cleanup;
+  if (derivekey_getpassline(key, sizeof(key)) < 0) {
+    sodium_munlock(key, sizeof(key));
+    sqlite3_close(db);
+    return -1;
   }
 
-  if (derive_key(key, sizeof(key), passphrase, readlen) != 0) {
-    fprintf(stderr, "subcmd_vault_add: failed to derive key, OOM?\n");
-    retcode = -1;
-    goto cleanup;
-  }
-  verbosef("v: key has been derived\n");
-
-  // TODO: compare this with hash from db, encrypt, store ciphertext
-  char keyhash[crypto_pwhash_STRBYTES];
-  if (db_get_keyhash(keyhash, db, vname) < 0) {
-    retcode = -1;
-    goto cleanup;
+  if (db_get_keyhash(dbhash, db, vname) < 0) {
+    sodium_munlock(key, sizeof(key));
+    sqlite3_close(db);
+    return -1;
   }
 
-  if (crypto_pwhash_str_verify(keyhash, (const char *const)key, sizeof(key)) !=
+  if (crypto_pwhash_str_verify(dbhash, (const char *const)key, sizeof(key)) !=
       0) {
-    fprintf(stderr, "invalid password for vault\n");
-    retcode = -2;
-    goto cleanup;
+    fprintf(stderr, "incorrect passphrase for '%s'\n", vname);
+
+    sodium_munlock(key, sizeof(key));
+    sqlite3_close(db);
+    return -2;
   }
 
   printf("ok\n");
   // TODO: receive password, ref and pname, encrypt, insert
-
-cleanup:
-  sodium_munlock(passphrase, psize);
-  free(passphrase);
-  sodium_munlock(key, sizeof(key));
-
-  sqlite3_close(db);
-  return retcode;
+  return 0;
 }
 
 // runs mkdir for the homedir/.passc directory. uses get_homedir; cwd will be
