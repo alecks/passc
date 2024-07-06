@@ -13,7 +13,7 @@
 #define MIGRATION_QUERY                                                        \
   "PRAGMA foreign_keys = ON;"                                                  \
   "CREATE TABLE IF NOT EXISTS vaults"                                          \
-  "(vname TEXT PRIMARY KEY, keyhash TEXT NOT NULL);"                           \
+  "(vname TEXT PRIMARY KEY, keyhash TEXT UNIQUE NOT NULL);"                    \
   "CREATE TABLE IF NOT EXISTS passwords ("                                     \
   "pname TEXT PRIMARY KEY,"                                                    \
   "ref TEXT NOT NULL,"                                                         \
@@ -376,6 +376,35 @@ cleanup:
   return retcode;
 }
 
+int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
+  sqlite3_stmt *stmt;
+  char *queryt =
+      sqlite3_mprintf("SELECT keyhash FROM vaults WHERE vname = %Q", vname);
+
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "db_get_keyhash: failed to prepare query: %s\n",
+            sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+    return -1;
+  }
+
+  if (sqlite3_step(stmt) != SQLITE_ROW) {
+    fprintf(stderr, "db_get_keyhash: query for keyhash returned no rows\n");
+    sqlite3_finalize(stmt);
+    return -1;
+  }
+
+  strcpy(out, (const char *)sqlite3_column_text(stmt, 0));
+  verbosef("found existing keyhash\n");
+
+  sqlite3_finalize(stmt);
+  return 0;
+}
+
+// subcommand to add a new password to a vault. returns 0 if ok, -1 on error, -2
+// on invalid password.
 int subcmd_vault_add(const char *vname) {
   sqlite3 *db;
   if (make_db(vname, &db) < 0)
@@ -404,6 +433,21 @@ int subcmd_vault_add(const char *vname) {
   verbosef("v: key has been derived\n");
 
   // TODO: compare this with hash from db, encrypt, store ciphertext
+  char keyhash[crypto_pwhash_STRBYTES];
+  if (db_get_keyhash(keyhash, db, vname) < 0) {
+    retval = -1;
+    goto cleanup;
+  }
+
+  if (crypto_pwhash_str_verify(keyhash, (const char *const)key, sizeof(key)) !=
+      0) {
+    fprintf(stderr, "invalid password for vault\n");
+    retval = -2;
+    goto cleanup;
+  }
+
+  printf("ok\n");
+  // TODO: receive password, ref and pname, encrypt, insert
 
 cleanup:
   sodium_munlock(passphrase, psize);
