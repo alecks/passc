@@ -48,7 +48,7 @@ void verbosef(const char *format, ...) {
 
 // this does NOT retain \n. locks memory with sodium_mlock; callers
 // responsibility to sodium_munlock and free. returns -1 on error, 0 on ok
-ssize_t passc_getpassline(char **lineptr, size_t *n, FILE *stream) {
+ssize_t secure_getpassline(char **lineptr, size_t *n, FILE *stream) {
   struct termios old, new;
 
   if (tcgetattr(fileno(stream), &old) != 0)
@@ -177,7 +177,7 @@ int derivekey_getpassline(unsigned char *key, size_t keysize) {
   size_t psize = 0;
 
   printf("Enter passphrase for vault: ");
-  ssize_t readlen = passc_getpassline(&passphrase, &psize, stdin);
+  ssize_t readlen = secure_getpassline(&passphrase, &psize, stdin);
   if (readlen == -1) {
     fprintf(stderr, "hash_getpassline: could not read passphrase from stdin\n");
     retcode = -1;
@@ -327,6 +327,51 @@ int db_vault_init(sqlite3 *db, const char *vname) {
   return retcode;
 }
 
+// selects the keyhash from the db, used to verify passphrases. returns 0 if ok,
+// -1 on error
+int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
+  int retcode = 0;
+
+  sqlite3_stmt *stmt = NULL;
+  char *queryt =
+      sqlite3_mprintf("SELECT keyhash FROM vaults WHERE vname = %Q", vname);
+
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
+      sqlite3_step(stmt) != SQLITE_ROW) {
+    fprintf(stderr, "failed to select keyhash: %s\n", sqlite3_errmsg(db));
+
+    retcode = -1;
+    goto cleanup;
+  }
+
+  strcpy(out, (const char *)sqlite3_column_text(stmt, 0));
+  verbosef("v: found existing keyhash\n");
+
+cleanup:
+  sqlite3_free(queryt);
+  sqlite3_finalize(stmt);
+  return retcode;
+}
+
+// asks user for passphrase, derives key and verifies this against the db. key
+// is written to key param. returns -1 on error, -2 if unauthorised, 0 if ok.
+int vault_authorise(sqlite3 *dbhdl, unsigned char *key, size_t keysize,
+                    const char *vname) {
+  char dbhash[crypto_pwhash_STRBYTES];
+
+  if (derivekey_getpassline(key, keysize) < 0 ||
+      db_get_keyhash(dbhash, dbhdl, vname) < 0) {
+    return -1;
+  }
+
+  if (crypto_pwhash_str_verify(dbhash, (const char *const)key, keysize) != 0) {
+    fprintf(stderr, "incorrect passphrase for '%s', unauthorised\n", vname);
+    return -2;
+  }
+  // ok
+  return 0;
+}
+
 // main function used for creating a db handle. runs db_init and
 // db_vault_init. callers responsibility to sqlite3_close if 0 returned (ok)
 int make_db(const char *vname, sqlite3 **outhdl) {
@@ -391,51 +436,6 @@ int subcmd_vault_list(const char *vname) {
 cleanup_db:
   sqlite3_close(db);
   return retcode;
-}
-
-// selects the keyhash from the db, used to verify passphrases. returns 0 if ok,
-// -1 on error
-int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
-  int retcode = 0;
-
-  sqlite3_stmt *stmt = NULL;
-  char *queryt =
-      sqlite3_mprintf("SELECT keyhash FROM vaults WHERE vname = %Q", vname);
-
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
-      sqlite3_step(stmt) != SQLITE_ROW) {
-    fprintf(stderr, "failed to select keyhash: %s\n", sqlite3_errmsg(db));
-
-    retcode = -1;
-    goto cleanup;
-  }
-
-  strcpy(out, (const char *)sqlite3_column_text(stmt, 0));
-  verbosef("v: found existing keyhash\n");
-
-cleanup:
-  sqlite3_free(queryt);
-  sqlite3_finalize(stmt);
-  return retcode;
-}
-
-// asks user for passphrase, derives key and verifies this against the db. key
-// is written to key param. returns -1 on error, -2 if unauthorised, 0 if ok.
-int vault_authorise(sqlite3 *dbhdl, unsigned char *key, size_t keysize,
-                    const char *vname) {
-  char dbhash[crypto_pwhash_STRBYTES];
-
-  if (derivekey_getpassline(key, keysize) < 0 ||
-      db_get_keyhash(dbhash, dbhdl, vname) < 0) {
-    return -1;
-  }
-
-  if (crypto_pwhash_str_verify(dbhash, (const char *const)key, keysize) != 0) {
-    fprintf(stderr, "incorrect passphrase for '%s', unauthorised\n", vname);
-    return -2;
-  }
-  // ok
-  return 0;
 }
 
 // subcommand to add a new password to a vault. returns 0 if ok, -1 on error.
