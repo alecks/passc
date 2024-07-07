@@ -49,7 +49,7 @@ void verbosef(const char *format, ...) {
 
 // this does NOT retain \n. locks memory with sodium_mlock; callers
 // responsibility to sodium_munlock and free. returns -1 on error, 0 on ok
-ssize_t secure_getpassline(char **lineptr, size_t *n, FILE *stream) {
+ssize_t secure_getpassline(char **lineptr, size_t *linecap, FILE *stream) {
   struct termios old, new;
 
   if (tcgetattr(fileno(stream), &old) != 0)
@@ -60,13 +60,13 @@ ssize_t secure_getpassline(char **lineptr, size_t *n, FILE *stream) {
   if (tcsetattr(fileno(stream), TCSAFLUSH, &new) != 0)
     return -1;
 
-  ssize_t nread = getline(lineptr, n, stream);
+  ssize_t nread = getline(lineptr, linecap, stream);
   if (nread > 0) {
     (*lineptr)[--nread] = '\0'; // replace \n
   }
   printf("\n");
 
-  if (sodium_mlock(*lineptr, *n) != 0) {
+  if (sodium_mlock(*lineptr, *linecap) != 0) {
     verbosef("v: sodium_mlock failed; your platform may not support this. "
              "error: %s\n",
              strerror(errno));
@@ -151,21 +151,21 @@ cleanup:
 }
 
 // wrapper over crypto_pwhash using the salt file. derives key from passphrase.
-int pp_derivekey(unsigned char *out, size_t outlen, char *passwd,
-                 size_t passwdlen) {
+int pp_derivekey(unsigned char *out, size_t outlen, char *passphrase,
+                 size_t pplen) {
   unsigned char salt[crypto_pwhash_SALTBYTES];
   if (find_salt(salt, sizeof(salt)) < 0) {
     return -1;
   }
 
   return crypto_pwhash(
-      out, outlen, passwd, passwdlen, salt, crypto_pwhash_OPSLIMIT_MODERATE,
+      out, outlen, passphrase, pplen, salt, crypto_pwhash_OPSLIMIT_MODERATE,
       crypto_pwhash_MEMLIMIT_MODERATE, crypto_pwhash_ALG_DEFAULT);
 }
 
 // wrapper over crypto_pwhash_str, hashes a derived key.
-int dk_keyhash(char *out, const unsigned char *const passwd, size_t passwdlen) {
-  return crypto_pwhash_str(out, (const char *const)passwd, passwdlen,
+int dk_keyhash(char *out, const unsigned char *const derivekey, size_t dklen) {
+  return crypto_pwhash_str(out, (const char *const)derivekey, dklen,
                            crypto_pwhash_OPSLIMIT_INTERACTIVE,
                            crypto_pwhash_MEMLIMIT_INTERACTIVE);
 }
@@ -174,10 +174,10 @@ int dk_keyhash(char *out, const unsigned char *const passwd, size_t passwdlen) {
 int getpassline_derivekey(unsigned char *key, size_t keysize) {
   int retcode = 0;
   char *passphrase = NULL;
-  size_t psize = 0;
+  size_t ppcap = 0;
 
   printf("Enter passphrase for vault: ");
-  ssize_t readlen = secure_getpassline(&passphrase, &psize, stdin);
+  ssize_t readlen = secure_getpassline(&passphrase, &ppcap, stdin);
   if (readlen == -1) {
     fprintf(stderr,
             "getpassline_derivekey: could not read passphrase from stdin\n");
@@ -194,7 +194,7 @@ int getpassline_derivekey(unsigned char *key, size_t keysize) {
   verbosef("v: key has been derived\n");
 
 cleanup:
-  sodium_munlock(passphrase, psize);
+  sodium_munlock(passphrase, ppcap);
   free(passphrase);
   return retcode;
 }
@@ -429,7 +429,7 @@ int make_db(const char *vname, sqlite3 **outhdl) {
 }
 
 // prints refs and pwids to stdout; returns 0 if ok, -1 on error
-int subcmd_vault_list(const char *vname) {
+int subcmd_list_passwords(const char *vname) {
   int retcode = 0;
 
   sqlite3 *db = NULL;
@@ -624,7 +624,7 @@ int main(int argc, char **argv) {
   if (!vault_name)
     vault_name = "main";
 
-  if (passc_dirinit() != 0)
+  if (passc_dirinit() < 0)
     return EXIT_FAILURE;
 
   // SUBCOMMAND MATCHING
@@ -636,14 +636,17 @@ int main(int argc, char **argv) {
 
   char *subcmd = argv[optind];
   if (strcmp(subcmd, "ls") == 0) {
-    if (subcmd_vault_list(vault_name) < 0) {
+    if (subcmd_list_passwords(vault_name) < 0) {
       fprintf(stderr, "couldn't list passwords in vault '%s'\n", vault_name);
       return EXIT_FAILURE;
     }
   } else if (strcmp(subcmd, "add") == 0) {
     if (subcmd_add_password(vault_name) < 0) {
       fprintf(stderr, "failed to add to vault\n");
+      return EXIT_FAILURE;
     }
+  } else if (strcmp(subcmd, "get") == 0) {
+    // TODO:
   } else {
     fprintf(stderr, "%s: unknown subcommand '%s'\n", pname, subcmd);
     perr_usage(pname);
