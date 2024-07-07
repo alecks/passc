@@ -419,7 +419,7 @@ typedef struct PasswordData {
 } PasswordData;
 
 // inserts a pw into db, returning the pw ID if ok, or -1 if not.
-int db_insert_password(sqlite3 *db, PasswordData *pw) {
+sqlite3_int64 db_insert_password(sqlite3 *db, PasswordData *pw) {
   sqlite3_stmt *stmt = NULL;
   char *queryt = sqlite3_mprintf("INSERT INTO PASSWORDS (ref, vname, "
                                  "ciphertext, nonce) VALUES (%Q, %Q, ?, ?)",
@@ -467,6 +467,12 @@ int vault_authorise(sqlite3 *dbhdl, unsigned char *key, size_t keysize,
   return 0;
 }
 
+// calls vault_authorise, expecting a key of size crypto_secretbox_KEYBYTES.
+int vault_authorise_discardkey(sqlite3 *dbhdl, const char *vname) {
+  unsigned char key[crypto_secretbox_KEYBYTES];
+  return vault_authorise(dbhdl, key, sizeof(key), vname);
+}
+
 // main function used for creating a db handle. runs db_init and
 // db_vault_init. callers responsibility to sqlite3_close if 0 returned (ok)
 int make_db(const char *vname, sqlite3 **outhdl) {
@@ -489,7 +495,7 @@ int make_db(const char *vname, sqlite3 **outhdl) {
 // steps a stmt, printing the rows in a human-readable format, returning the
 // number of rows. returns -1 on error. assumes the first col is a rowid.
 // last_rowid is set to the final rowid printed, or ignored if NULL.
-int db_print_rows(sqlite3_stmt *stmt, long *last_rowid) {
+int db_print_rows(sqlite3_stmt *stmt, sqlite3_int64 *last_rowid) {
   int rowcount = 0;
 
   int rc = sqlite3_step(stmt);
@@ -497,8 +503,8 @@ int db_print_rows(sqlite3_stmt *stmt, long *last_rowid) {
     rowcount++;
     const int nocols = sqlite3_column_count(stmt);
 
-    long rowid = sqlite3_column_int(stmt, 0);
-    printf("%ld | ", rowid);
+    sqlite3_int64 rowid = sqlite3_column_int64(stmt, 0);
+    printf("%lld | ", rowid);
     if (last_rowid) {
       *last_rowid = rowid;
     }
@@ -524,7 +530,8 @@ int db_print_rows(sqlite3_stmt *stmt, long *last_rowid) {
 // finds passwords matching the pattern %ref%, and asks the user to select one.
 // if there is one match, it is returned immediately. returns -1 on error and
 // pwid if ok. should never return 0 unless this is used as a rowid in the db.
-long interactive_pw_selection(sqlite3 *db, const char *ref, const char *vname) {
+sqlite3_int64 interactive_pw_selection(sqlite3 *db, const char *ref,
+                                       const char *vname) {
   sqlite3_stmt *stmt = NULL;
   char *queryt = sqlite3_mprintf(
       "SELECT pwid, ref FROM passwords WHERE ref LIKE '%%%q%%' AND vname = %Q",
@@ -540,7 +547,7 @@ long interactive_pw_selection(sqlite3 *db, const char *ref, const char *vname) {
   sqlite3_free(queryt);
   queryt = NULL;
 
-  long pwid = -1;
+  sqlite3_int64 pwid = -1;
   int pwcount = db_print_rows(stmt, &pwid);
   if (pwcount <= 0) {
     if (pwcount < 0) {
@@ -567,7 +574,7 @@ long interactive_pw_selection(sqlite3 *db, const char *ref, const char *vname) {
       fprintf(stderr, "interactive_pw_selection: couldn't read from stdin\n");
       return -1;
     }
-    pwid = strtol(inp, NULL, 10);
+    pwid = strtoll(inp, NULL, 10);
   }
 
   return pwid;
@@ -646,13 +653,13 @@ int subcmd_add_password(sqlite3 *db, const char *ref, const char *vname) {
       .ref = ref,
       .vname = vname,
   };
-  const int pwid = db_insert_password(db, &pwdata);
+  const sqlite3_int64 pwid = db_insert_password(db, &pwdata);
 
   if (pwid < 0) {
     return -1;
   }
 
-  printf("Done. Password ID: %d\n", pwid);
+  printf("Done. Password ID: %lld\n", pwid);
   return 0;
 
 cleanup:
@@ -663,26 +670,46 @@ cleanup:
 }
 
 int subcmd_rm_password(sqlite3 *db, const char *ref, const char *vname) {
-  long pwid = interactive_pw_selection(db, ref, vname);
+  sqlite3_int64 pwid = interactive_pw_selection(db, ref, vname);
   if (pwid < 0) {
     return -1;
   }
 
-  printf("unimplemented\n");
+  printf("Deleting password with PWID %lld. If you are unsure which password "
+         "this is, use the 'get' subcommand to decrypt it before deletion.\n",
+         pwid);
 
+  if (vault_authorise_discardkey(db, vname) < 0) {
+    return -1;
+  }
+
+  sqlite3_stmt *stmt;
+  char *queryt =
+      sqlite3_mprintf("DELETE FROM passwords WHERE pwid = %lld", pwid);
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
+      sqlite3_step(stmt) != SQLITE_DONE) {
+    fprintf(stderr, "subcmd_rm_password: failed to delete pw: %s\n",
+            sqlite3_errmsg(db));
+
+    free(queryt);
+    sqlite3_finalize(stmt);
+    return -1;
+  }
+
+  verbosef("v: pw has been deleted\n");
   return 0;
 }
 
 // gets a password from the db and decrypts. -1 on err, 0 if ok.
 int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
-  long pwid = interactive_pw_selection(db, ref, vname);
+  sqlite3_int64 pwid = interactive_pw_selection(db, ref, vname);
   if (pwid < 0) {
     return -1;
   }
 
   sqlite3_stmt *stmt;
   char *queryt = sqlite3_mprintf("SELECT ciphertext, nonce FROM passwords "
-                                 "WHERE pwid = %d AND vname = %Q",
+                                 "WHERE pwid = %lld AND vname = %Q",
                                  pwid, vname);
 
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
@@ -724,7 +751,7 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   }
 
   pw[sizeof(pw) - 1] = '\0';
-  printf("\nPWID: %ld\n--------\n%s\n", pwid, pw);
+  printf("\nPWID: %lld\n--------\n%s\n", pwid, pw);
 
   sodium_munlock(pw, sizeof(pw));
   sqlite3_finalize(stmt);
