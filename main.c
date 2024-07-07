@@ -514,6 +514,58 @@ int db_print_rows(sqlite3_stmt *stmt) {
   return rowcount;
 }
 
+// finds passwords matching the pattern %ref%, and asks the user to select one
+// using the pwid. if there is only one match, 0 is returned. returns -1 on err,
+// 0 if pwid not provided by user or one match, and pwid if ok.
+long interactive_pw_selection(sqlite3 *db, const char *ref, const char *vname) {
+  sqlite3_stmt *stmt = NULL;
+  char *queryt = sqlite3_mprintf(
+      "SELECT pwid, ref FROM passwords WHERE ref LIKE '%%%q%%' AND vname = %Q",
+      ref, vname); // '%r%'
+
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
+    fprintf(stderr, "interactive_pw_selection: couldn't prepare stmt: %s\n",
+            sqlite3_errmsg(db));
+
+    sqlite3_free(queryt);
+    return -1;
+  }
+  sqlite3_free(queryt);
+  queryt = NULL;
+
+  int pwcount = db_print_rows(stmt);
+  if (pwcount < 1) {
+    if (pwcount < 0) {
+      fprintf(stderr, "interactive_pw_selection: failed to list pws: %s\n",
+              sqlite3_errmsg(db));
+    } else {
+      fprintf(stderr,
+              "no passwords with that reference -- try using ls subcommand\n");
+    }
+
+    sqlite3_finalize(stmt);
+    return -1;
+  }
+
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  long pwid = 0;
+  if (pwcount != 1) {
+    char *inp = NULL;
+    size_t inpcap = 0;
+
+    printf("Select password: ");
+    if (passc_getline(&inp, &inpcap, stdin) < 0) {
+      fprintf(stderr, "interactive_pw_selection: couldn't read from stdin\n");
+      return -1;
+    }
+    pwid = strtol(inp, NULL, 10);
+  }
+
+  return pwid;
+}
+
 // prints refs and pwids to stdout; returns 0 if ok, -1 on error
 int subcmd_list_passwords(sqlite3 *db, const char *vname) {
   int retcode = 0;
@@ -603,55 +655,30 @@ cleanup:
   return retcode;
 }
 
-// TODO: put db in passc dir
+int subcmd_rm_password(sqlite3 *db, const char *ref, const char *vname) {
+  long pwid = interactive_pw_selection(db, ref, vname);
+  if (pwid < 0) {
+    return -1;
+  }
+
+  printf("unimplemented\n");
+
+  return 0;
+}
+
+// gets a password from the db and decrypts. -1 on err, 0 if ok.
 int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
-  sqlite3_stmt *stmt = NULL;
-  char *queryt = sqlite3_mprintf(
-      "SELECT pwid, ref FROM passwords WHERE ref LIKE '%%%q%%'", ref); // '%r%'
-
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
-    fprintf(stderr, "subcmd_get_password: couldn't prepare stmt: %s\n",
-            sqlite3_errmsg(db));
-
-    sqlite3_free(queryt);
-    return -1;
-  }
-  sqlite3_free(queryt);
-  queryt = NULL;
-
-  int pwcount = db_print_rows(stmt);
-  if (pwcount < 1) {
-    if (pwcount < 0) {
-      fprintf(stderr, "subcmd_get_password: failed to list pws: %s\n",
-              sqlite3_errmsg(db));
-    } else {
-      fprintf(stderr,
-              "no passwords with that reference -- try using ls subcommand\n");
-    }
-
-    sqlite3_finalize(stmt);
+  long pwid = interactive_pw_selection(db, ref, vname);
+  if (pwid < 0) {
     return -1;
   }
 
-  sqlite3_finalize(stmt);
-  stmt = NULL;
+  sqlite3_stmt *stmt;
+  char *queryt =
+      sqlite3_mprintf("SELECT pwid, ciphertext, nonce FROM passwords "
+                      "WHERE (pwid = %d OR ref = %Q) AND vname = %Q",
+                      pwid, ref, vname);
 
-  long pwid = 0;
-  if (pwcount != 1) {
-    char *inp = NULL;
-    size_t inpcap = 0;
-
-    printf("Select password: ");
-    if (passc_getline(&inp, &inpcap, stdin) < 0) {
-      fprintf(stderr, "subcmd_get_password: couldn't read from stdin\n");
-      return -1;
-    }
-    pwid = strtol(inp, NULL, 10);
-  }
-
-  queryt = sqlite3_mprintf("SELECT pwid, ciphertext, nonce FROM passwords "
-                           "WHERE pwid = %d OR ref = %Q",
-                           pwid, ref);
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
     fprintf(stderr, "subcmd_get_password: failed to select cipher/nonce: %s\n",
             sqlite3_errmsg(db));
@@ -680,20 +707,34 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   }
 
   unsigned char pw[ctlen - crypto_secretbox_MACBYTES + 1];
+  sodium_mlock(pw, sizeof(pw));
   if (crypto_secretbox_open_easy(pw, ciphertext, ctlen, nonce, key) != 0) {
     fprintf(stderr, "FAILED to verify & decrypt. This should not be possible; "
                     "the passphrase matched. It is most likely that the salt "
                     "or ciphertext has been corrupted.\n");
 
+    sodium_munlock(pw, sizeof(pw));
     sqlite3_finalize(stmt);
     return -1;
   }
-  pw[sizeof(pw) - 1] = '\0';
 
+  pw[sizeof(pw) - 1] = '\0';
   printf("\nPWID: %ld\n--------\n%s\n", pwid, pw);
+
+  sodium_munlock(pw, sizeof(pw));
   sqlite3_finalize(stmt);
   return 0;
 }
+
+typedef int (*SubcmdHandler)(sqlite3 *db, const char *arg,
+                             const char *vault_name);
+typedef int (*SubcmdHandlerNoArg)(sqlite3 *db, const char *vault_name);
+
+typedef struct PasscSubcmd {
+  const char *name;
+  SubcmdHandler handler;
+  SubcmdHandlerNoArg handler_noarg;
+} PasscSubcmd;
 
 // prints usage to stderr
 void perr_usage(const char *pname) {
@@ -735,7 +776,6 @@ int main(int argc, char **argv) {
   if (!vault_name)
     vault_name = "main";
 
-  // SUBCOMMAND MATCHING
   if (optind >= argc) {
     fprintf(stderr, "%s: expected subcommand\n", pname);
     perr_usage(pname);
@@ -748,39 +788,45 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
+  PasscSubcmd subcmds[] = {
+      {"ls", NULL, subcmd_list_passwords},
+      {"add", subcmd_add_password, NULL},
+      {"rm", subcmd_rm_password, NULL},
+      {"get", subcmd_get_password, NULL},
+  };
+  const int no_subcmds = sizeof(subcmds) / sizeof(subcmds[0]);
+
   int retcode = EXIT_SUCCESS;
-
   char *subcmd = argv[optind];
-  if (strcmp(subcmd, "ls") == 0) {
-    if (subcmd_list_passwords(db, vault_name) < 0) {
-      fprintf(stderr, "couldn't list passwords in vault '%s'\n", vault_name);
-      retcode = EXIT_FAILURE;
-    }
-  } else if (strcmp(subcmd, "add") == 0) {
-    if (optind + 1 >= argc) {
-      fprintf(stderr, "%s: expected reference argument\n", pname);
-      perr_usage(pname);
-      retcode = EXIT_FAILURE;
-    }
+  int found = 0;
 
-    if (subcmd_add_password(db, argv[optind + 1], vault_name) < 0) {
-      fprintf(stderr, "failed to add to vault '%s'\n", vault_name);
-      retcode = EXIT_FAILURE;
-    }
-  } else if (strcmp(subcmd, "get") == 0) {
-    if (optind + 1 >= argc) {
-      fprintf(stderr, "%s: expected reference argument\n", pname);
-      perr_usage(pname);
-      retcode = EXIT_FAILURE;
-    }
+  for (int i = 0; i < no_subcmds; i++) {
+    if (strcmp(subcmd, subcmds[i].name) == 0) {
+      found = 1;
+      if (subcmds[i].handler_noarg) {
+        retcode = subcmds[i].handler_noarg(db, vault_name);
+      } else {
+        if (optind + 1 >= argc) {
+          fprintf(stderr, "%s: expected argument\n", pname);
+          perr_usage(pname);
 
-    if (subcmd_get_password(db, argv[optind + 1], vault_name) < 0) {
-      fprintf(stderr, "failed to get password from vault '%s'\n", vault_name);
-      retcode = EXIT_FAILURE;
+          retcode = EXIT_FAILURE;
+          break;
+        }
+        retcode = subcmds[i].handler(db, argv[optind + 1], vault_name);
+      }
+
+      if (retcode < 0) {
+        fprintf(stderr, "failed to execute '%s' for vault '%s'\n",
+                subcmds[i].name, vault_name);
+      }
+
+      break;
     }
-  } else {
-    fprintf(stderr, "%s: unknown subcommand '%s'\n", pname, subcmd);
-    perr_usage(pname);
+  }
+
+  if (!found) {
+    fprintf(stderr, "%s: unknown subcommand\n", pname);
     retcode = EXIT_FAILURE;
   }
 
