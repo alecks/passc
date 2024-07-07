@@ -849,8 +849,8 @@ int main(int argc, char **argv) {
       }
 
       if (retcode < 0) {
-        fprintf(stderr, "failed to execute '%s' for vault '%s'\n",
-                subcmds[i].name, vault_name);
+        fprintf(stderr, "command '%s' failed for vault '%s'\n", subcmds[i].name,
+                vault_name);
       }
 
       break;
