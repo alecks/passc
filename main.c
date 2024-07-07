@@ -431,6 +431,7 @@ int vault_authorise(sqlite3 *dbhdl, unsigned char *key, size_t keysize,
   }
 
   if (crypto_pwhash_str_verify(dbhash, (const char *const)key, keysize) != 0) {
+    fprintf(stderr, "incorrect passphrase for '%s', unauthorised\n", vname);
     return -2;
   }
   // ok
@@ -446,15 +447,12 @@ int subcmd_vault_add(const char *vname) {
   unsigned char key[crypto_secretbox_KEYBYTES];
   sodium_mlock(key, sizeof(key));
 
-  switch (vault_authorise(db, key, sizeof(key), vname)) {
-  case -1:
-    return -1;
-  case -2:
-    fprintf(stderr, "incorrect passphrase for '%s', unauthorised\n", vname);
+  if (vault_authorise(db, key, sizeof(key), vname) < 0) {
     return -1;
   }
 
-  printf("ok\n");
+  // TODO: encrypt & store
+
   return 0;
 }
 
