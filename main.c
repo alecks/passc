@@ -150,9 +150,9 @@ cleanup:
   return retcode;
 }
 
-// wrapper over crypto_pwhash using the salt
-int derive_key(unsigned char *out, size_t outlen, char *passwd,
-               size_t passwdlen) {
+// wrapper over crypto_pwhash using the salt file. derives key from passphrase.
+int pp_derivekey(unsigned char *out, size_t outlen, char *passwd,
+                 size_t passwdlen) {
   unsigned char salt[crypto_pwhash_SALTBYTES];
   if (find_salt(salt, sizeof(salt)) < 0) {
     return -1;
@@ -163,16 +163,15 @@ int derive_key(unsigned char *out, size_t outlen, char *passwd,
       crypto_pwhash_MEMLIMIT_MODERATE, crypto_pwhash_ALG_DEFAULT);
 }
 
-// wrapper over crypto_pwhash_str, casts unsigned char to char
-int hash_derived_key(char *out, const unsigned char *const passwd,
-                     size_t passwdlen) {
+// wrapper over crypto_pwhash_str, hashes a derived key.
+int dk_keyhash(char *out, const unsigned char *const passwd, size_t passwdlen) {
   return crypto_pwhash_str(out, (const char *const)passwd, passwdlen,
                            crypto_pwhash_OPSLIMIT_INTERACTIVE,
                            crypto_pwhash_MEMLIMIT_INTERACTIVE);
 }
 
 // reads a passphrase from stdin and derives a key from it; 0 if ok, -1 on error
-int derivekey_getpassline(unsigned char *key, size_t keysize) {
+int getpassline_derivekey(unsigned char *key, size_t keysize) {
   int retcode = 0;
   char *passphrase = NULL;
   size_t psize = 0;
@@ -180,13 +179,14 @@ int derivekey_getpassline(unsigned char *key, size_t keysize) {
   printf("Enter passphrase for vault: ");
   ssize_t readlen = secure_getpassline(&passphrase, &psize, stdin);
   if (readlen == -1) {
-    fprintf(stderr, "hash_getpassline: could not read passphrase from stdin\n");
+    fprintf(stderr,
+            "getpassline_derivekey: could not read passphrase from stdin\n");
     retcode = -1;
     goto cleanup;
   }
 
-  if (derive_key(key, keysize, passphrase, readlen) != 0) {
-    fprintf(stderr, "hash_getpassline: failed to derive key, OOM?\n");
+  if (pp_derivekey(key, keysize, passphrase, readlen) != 0) {
+    fprintf(stderr, "getpassline_derivekey: failed to derive key, OOM?\n");
     retcode = -1;
     goto cleanup;
   }
@@ -201,19 +201,19 @@ cleanup:
 
 // same as derivekey_getpassline, except discards the key and returns the hash
 // of the key instead. 0 if ok, -1 on error.
-int keyhash_getpassline(char *outkeyhash) {
+int getpassline_keyhash(char *outkeyhash) {
   int retcode = 0;
   unsigned char key[crypto_secretbox_KEYBYTES];
   sodium_mlock(key, sizeof(key));
 
-  if (derivekey_getpassline(key, sizeof(key)) < 0) {
+  if (getpassline_derivekey(key, sizeof(key)) < 0) {
     retcode = -1;
     goto cleanup;
   }
 
   // we now have the key; hash this and store it so that, upon insertion into
   // the vault, we can check if it is the correct passphrase
-  if (hash_derived_key(outkeyhash, key, sizeof(key)) != 0) {
+  if (dk_keyhash(outkeyhash, key, sizeof(key)) != 0) {
     fprintf(stderr, "keyhash_getpassline: failed to hash derived key, OOM?\n");
     retcode = -1;
     goto cleanup;
@@ -268,7 +268,7 @@ int db_vault_create(sqlite3 *db, const char *vname) {
 
   printf("KEY CREATION: A key will be derived from your given passphrase.\n"
          "Ensure this is different to those used by other vaults.\n");
-  if (keyhash_getpassline(keyhash) < 0)
+  if (getpassline_keyhash(keyhash) < 0)
     return -1;
 
   sqlite3_stmt *stmt = NULL;
@@ -355,13 +355,51 @@ cleanup:
   return retcode;
 }
 
+typedef struct PasswordData {
+  const unsigned char *ciphertext;
+  size_t ctsize;
+  const unsigned char *nonce;
+  size_t ncesize;
+  const char *ref;
+  const char *vname;
+} PasswordData;
+
+// inserts a pw into db, returning the pw ID if ok, or -1 if not.
+int db_insert_password(sqlite3 *db, PasswordData *pw) {
+  sqlite3_stmt *stmt = NULL;
+  char *queryt = sqlite3_mprintf("INSERT INTO PASSWORDS (ref, vname, "
+                                 "ciphertext, nonce) VALUES (%Q, %Q, ?, ?)",
+                                 pw->ref, pw->vname);
+
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
+    fprintf(stderr, "db_insert_password: failed to prepare query: %s\n",
+            sqlite3_errmsg(db));
+    sqlite3_free(queryt);
+    return -1;
+  }
+  sqlite3_free(queryt);
+
+  sqlite3_bind_blob(stmt, 1, pw->ciphertext, pw->ctsize, SQLITE_STATIC);
+  sqlite3_bind_blob(stmt, 2, pw->nonce, pw->ncesize, SQLITE_STATIC);
+
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    fprintf(stderr, "db_insert_password: failed to insert pw: %s",
+            sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+    return -1;
+  }
+
+  sqlite3_finalize(stmt);
+  return sqlite3_last_insert_rowid(db);
+}
+
 // asks user for passphrase, derives key and verifies this against the db. key
 // is written to key param. returns -1 on error, -2 if unauthorised, 0 if ok.
 int vault_authorise(sqlite3 *dbhdl, unsigned char *key, size_t keysize,
                     const char *vname) {
   char dbhash[crypto_pwhash_STRBYTES];
 
-  if (derivekey_getpassline(key, keysize) < 0 ||
+  if (getpassline_derivekey(key, keysize) < 0 ||
       db_get_keyhash(dbhash, dbhdl, vname) < 0) {
     return -1;
   }
@@ -441,7 +479,7 @@ cleanup_db:
 }
 
 // reads a reference and password from stdin into *ref and *pw. size of pw buf
-// read into *pwcap, used to sodium_munlock. retval is the length of the
+// read into *pwcap, use this to sodium_munlock. retval is the length of the
 // password, or -1 on error. if non-negative val is returned, pw and ref must be
 // free()'d by the caller
 ssize_t interactive_get_add_vals(char **ref, char **pw, size_t *pwcap) {
@@ -471,8 +509,17 @@ ssize_t interactive_get_add_vals(char **ref, char **pw, size_t *pwcap) {
   return pwlen;
 }
 
+// wrapper over crypto_secretbox_easy, generating random nonce. expects nonce to
+// be able to fit crypto_secretbox_NONCEBYTES
+int pw_encrypt_secretbox(unsigned char *ciphertext, const unsigned char *pw,
+                         unsigned long long pwlen, unsigned char *nonce,
+                         unsigned char *key) {
+  randombytes_buf(nonce, crypto_secretbox_NONCEBYTES);
+  return crypto_secretbox_easy(ciphertext, pw, pwlen, nonce, key);
+}
+
 // subcommand to add a new password to a vault. returns 0 if ok, -1 on error.
-int subcmd_vault_add(const char *vname) {
+int subcmd_add_password(const char *vname) {
   sqlite3 *db = NULL;
   if (make_db(vname, &db) < 0)
     return -1;
@@ -497,16 +544,14 @@ int subcmd_vault_add(const char *vname) {
 
   unsigned char ciphertext[crypto_secretbox_MACBYTES + pwlen];
   unsigned char nonce[crypto_secretbox_NONCEBYTES];
+  if (pw_encrypt_secretbox(ciphertext, (const unsigned char *)pw, pwlen, nonce,
+                           key) != 0) {
+    fprintf(stderr, "subcmd_add_password: failed to encrypt pw\n");
 
-  randombytes_buf(nonce, sizeof(nonce));
-  if (crypto_secretbox_easy(ciphertext, (const unsigned char *)pw, pwlen, nonce,
-                            key) != 0) {
-    fprintf(stderr, "subcmd_vault_add: failed to encrypt pw\n");
-
+    sodium_munlock(key, sizeof(key));
     sodium_munlock(pw, pwcap);
     free(pw);
     free(ref);
-    sodium_munlock(key, sizeof(key));
     return -1;
   }
 
@@ -514,33 +559,22 @@ int subcmd_vault_add(const char *vname) {
   sodium_munlock(pw, pwcap);
   free(pw);
 
-  sqlite3_stmt *stmt = NULL;
-  char *queryt = sqlite3_mprintf("INSERT INTO PASSWORDS (ref, vname, "
-                                 "ciphertext, nonce) VALUES (%Q, %Q, ?, ?)",
-                                 ref, vname);
+  PasswordData pwdata = {
+      .ciphertext = ciphertext,
+      .ctsize = sizeof(ciphertext),
+      .nonce = nonce,
+      .ncesize = sizeof(nonce),
+      .ref = ref,
+      .vname = vname,
+  };
+  int pwid = db_insert_password(db, &pwdata);
   free(ref);
 
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
-    fprintf(stderr, "subcmd_vault_add: failed to prepare query: %s\n",
-            sqlite3_errmsg(db));
-    sqlite3_free(queryt);
-    return -1;
-  }
-  sqlite3_free(queryt);
-
-  sqlite3_bind_blob(stmt, 1, ciphertext, sizeof(ciphertext), SQLITE_STATIC);
-  sqlite3_bind_blob(stmt, 2, nonce, sizeof(nonce), SQLITE_STATIC);
-
-  if (sqlite3_step(stmt) != SQLITE_DONE) {
-    fprintf(stderr, "subcmd_vault_add: failed to insert pw: %s",
-            sqlite3_errmsg(db));
-    sqlite3_finalize(stmt);
+  if (pwid < 0) {
     return -1;
   }
 
-  printf("Done. Password ID: %lld\n", sqlite3_last_insert_rowid(db));
-
-  sqlite3_finalize(stmt);
+  printf("Done. Password ID: %d\n", pwid);
   return 0;
 }
 
@@ -607,7 +641,7 @@ int main(int argc, char **argv) {
       return EXIT_FAILURE;
     }
   } else if (strcmp(subcmd, "add") == 0) {
-    if (subcmd_vault_add(vault_name) < 0) {
+    if (subcmd_add_password(vault_name) < 0) {
       fprintf(stderr, "failed to add to vault\n");
     }
   } else {
