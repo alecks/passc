@@ -23,11 +23,71 @@
   "FOREIGN KEY (vname) REFERENCES vaults (vname));"                            \
   "CREATE INDEX IF NOT EXISTS refidx ON passwords (ref);"
 
-int _passc_log_level = 0;
+// tries to get the homedir from passwd entry, otherwise $HOME, otherwise cwd.
+// expects out to be able to fit PATH_MAX
+void get_homedir(char *out) {
+  const char *dir = NULL;
+  struct passwd *pwd = getpwuid(getuid());
+  if (pwd && pwd->pw_dir) {
+    dir = pwd->pw_dir;
+  } else {
+    dir = getenv("HOME");
+  }
+
+  if (!dir) {
+    dir = ".";
+  }
+  strcpy(out, dir);
+}
+
+// runs mkdir for the homedir/.passc directory. uses get_homedir; cwd will be
+// used instead if unavailable. -1 on error, 0 if ok
+int passc_dirinit(char *out) {
+  char pth[PATH_MAX];
+  char homedir[PATH_MAX];
+
+  get_homedir(homedir);
+  cwk_path_join(homedir, ".passc", pth, sizeof(pth));
+
+  errno = 0;
+  if (mkdir(pth, 0777) != 0 && errno != EEXIST) {
+    fprintf(stderr, "failed to create .passc directory at %s\n", pth);
+    return -1;
+  }
+
+  strcpy(out, pth);
+  return 0;
+}
+
+typedef struct PasscConfig {
+  int loglevel;
+  char datadir[PATH_MAX];
+} PasscConfig;
+
+PasscConfig *conf_get(void) {
+  static PasscConfig conf;
+  static int initialised = 0;
+
+  if (!initialised) {
+    conf.loglevel = 0;
+    if (passc_dirinit(conf.datadir) < 0) {
+      exit(EXIT_FAILURE);
+    }
+
+    initialised = 1;
+  }
+
+  return &conf;
+}
+
+void conf_set_loglevel(int lvl) {
+  PasscConfig *conf = conf_get();
+  conf->loglevel = lvl;
+}
 
 // verbose format logging if _passc_log_level is >= 1
 void verbosef(const char *format, ...) {
-  if (_passc_log_level < 1)
+  if (conf_get()->loglevel < 1)
     return;
 
   va_list args;
@@ -76,23 +136,6 @@ ssize_t passc_getline(char **lineptr, size_t *linecap, FILE *stream) {
   return nread;
 }
 
-// tries to get the homedir from passwd entry, otherwise $HOME, otherwise cwd.
-// expects out to be able to fit PATH_MAX
-void get_homedir(char *out) {
-  const char *dir = NULL;
-  struct passwd *pwd = getpwuid(getuid());
-  if (pwd && pwd->pw_dir) {
-    dir = pwd->pw_dir;
-  } else {
-    dir = getenv("HOME");
-  }
-
-  if (!dir) {
-    dir = ".";
-  }
-  strcpy(out, dir);
-}
-
 int gen_new_salt(unsigned char *salt, size_t n, const char *filepath) {
   int retcode = 0;
 
@@ -119,11 +162,9 @@ cleanup:
 
 int find_salt(unsigned char *salt, size_t n) {
   int retcode = 0;
-  char homedir[PATH_MAX];
-  char filepath[PATH_MAX];
 
-  get_homedir(homedir);
-  cwk_path_join(homedir, ".passc/salt", filepath, sizeof(filepath));
+  char filepath[PATH_MAX];
+  cwk_path_join(conf_get()->datadir, "salt", filepath, sizeof(filepath));
 
   FILE *fp = fopen(filepath, "r");
   if (!fp) {
@@ -428,9 +469,9 @@ int vault_authorise(sqlite3 *dbhdl, unsigned char *key, size_t keysize,
 
 // main function used for creating a db handle. runs db_init and
 // db_vault_init. callers responsibility to sqlite3_close if 0 returned (ok)
-int make_db(const char *confdir, const char *vname, sqlite3 **outhdl) {
+int make_db(const char *vname, sqlite3 **outhdl) {
   char dbpath[PATH_MAX];
-  cwk_path_join(confdir, "passc.db", dbpath, sizeof(dbpath));
+  cwk_path_join(conf_get()->datadir, "passc.db", dbpath, sizeof(dbpath));
 
   sqlite3 *db = NULL;
   if (db_init(dbpath, &db) < 0)
@@ -654,26 +695,6 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   return 0;
 }
 
-// runs mkdir for the homedir/.passc directory. uses get_homedir; cwd will be
-// used instead if unavailable. -1 on error, 0 if ok
-int passc_dirinit(char *out) {
-  char pth[PATH_MAX];
-  char homedir[PATH_MAX];
-
-  get_homedir(homedir);
-  cwk_path_join(homedir, ".passc", pth, sizeof(pth));
-
-  errno = 0;
-  if (mkdir(pth, 0777) != 0 && errno != EEXIST) {
-    fprintf(stderr, "failed to create .passc directory at %s\n", pth);
-    return -1;
-  }
-
-  verbosef("v: .passc dir available at %s\n", pth);
-  strcpy(out, pth);
-  return 0;
-}
-
 // prints usage to stderr
 void perr_usage(const char *pname) {
   fprintf(stderr,
@@ -703,7 +724,7 @@ int main(int argc, char **argv) {
       vault_name = optarg;
       break;
     case 'v':
-      _passc_log_level = 1;
+      conf_set_loglevel(1);
       break;
     default: // '?'
       perr_usage(pname);
@@ -714,10 +735,6 @@ int main(int argc, char **argv) {
   if (!vault_name)
     vault_name = "main";
 
-  char confdir[PATH_MAX];
-  if (passc_dirinit(confdir) < 0)
-    return EXIT_FAILURE;
-
   // SUBCOMMAND MATCHING
   if (optind >= argc) {
     fprintf(stderr, "%s: expected subcommand\n", pname);
@@ -726,7 +743,7 @@ int main(int argc, char **argv) {
   }
 
   sqlite3 *db = NULL;
-  if (make_db(confdir, vault_name, &db) < 0) {
+  if (make_db(vault_name, &db) < 0) {
     fprintf(stderr, "couldn't initialise database\n");
     return EXIT_FAILURE;
   }
