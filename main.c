@@ -160,6 +160,15 @@ int dk_keyhash(char *out, const unsigned char *const derivekey, size_t dklen) {
                            crypto_pwhash_MEMLIMIT_INTERACTIVE);
 }
 
+// wrapper over crypto_secretbox_easy, generating random nonce. expects nonce to
+// be able to fit crypto_secretbox_NONCEBYTES
+int pw_encrypt_secretbox(unsigned char *ciphertext, const unsigned char *pw,
+                         unsigned long long pwlen, unsigned char *nonce,
+                         unsigned char *key) {
+  randombytes_buf(nonce, crypto_secretbox_NONCEBYTES);
+  return crypto_secretbox_easy(ciphertext, pw, pwlen, nonce, key);
+}
+
 // reads a passphrase from stdin and derives a key from it; 0 if ok, -1 on error
 int getpassline_derivekey(unsigned char *key, size_t keysize) {
   int retcode = 0;
@@ -168,9 +177,14 @@ int getpassline_derivekey(unsigned char *key, size_t keysize) {
 
   printf("Enter passphrase for vault: ");
   ssize_t readlen = secure_getpassline(&passphrase, &ppcap, stdin);
-  if (readlen == -1) {
-    fprintf(stderr,
-            "getpassline_derivekey: could not read passphrase from stdin\n");
+  if (readlen < 1) {
+    if (readlen < 0) {
+      fprintf(stderr,
+              "getpassline_derivekey: could not read passphrase from stdin\n");
+    } else {
+      fprintf(stderr, "passphrase is required\n");
+    }
+
     retcode = -1;
     goto cleanup;
   }
@@ -398,7 +412,8 @@ int vault_authorise(sqlite3 *dbhdl, unsigned char *key, size_t keysize,
     fprintf(stderr, "incorrect passphrase for '%s', unauthorised\n", vname);
     return -2;
   }
-  // ok
+
+  printf("ok\n");
   return 0;
 }
 
@@ -468,48 +483,10 @@ cleanup_db:
   return retcode;
 }
 
-// reads a reference and password from stdin into *ref and *pw. size of pw buf
-// read into *pwcap, use this to sodium_munlock. retval is the length of the
-// password, or -1 on error. if non-negative val is returned, pw and ref must be
-// free()'d by the caller
-ssize_t interactive_get_add_vals(char **ref, char **pw, size_t *pwcap) {
-  size_t refcap = 0;
-
-  printf("Reference (e.g. example.org): ");
-  int reflen = getline(ref, &refcap, stdin);
-  if (reflen < 2) { // one character plus \n
-    fprintf(stderr, "reference is required\n");
-
-    free(ref);
-    return -1;
-  }
-  (*ref)[--reflen] = '\0';
-
-  printf("Password: ");
-  int pwlen = secure_getpassline(pw, pwcap, stdin);
-  if (pwlen < 1) {
-    fprintf(stderr, "password is required\n");
-
-    free(ref);
-    sodium_munlock(pw, *pwcap);
-    free(pw);
-    return -1;
-  }
-
-  return pwlen;
-}
-
-// wrapper over crypto_secretbox_easy, generating random nonce. expects nonce to
-// be able to fit crypto_secretbox_NONCEBYTES
-int pw_encrypt_secretbox(unsigned char *ciphertext, const unsigned char *pw,
-                         unsigned long long pwlen, unsigned char *nonce,
-                         unsigned char *key) {
-  randombytes_buf(nonce, crypto_secretbox_NONCEBYTES);
-  return crypto_secretbox_easy(ciphertext, pw, pwlen, nonce, key);
-}
-
 // subcommand to add a new password to a vault. returns 0 if ok, -1 on error.
-int subcmd_add_password(const char *vname) {
+int subcmd_add_password(const char *ref, const char *vname) {
+  int retcode = 0;
+
   sqlite3 *db = NULL;
   if (make_db(vname, &db) < 0)
     return -1;
@@ -522,27 +499,28 @@ int subcmd_add_password(const char *vname) {
     return -1;
   }
 
-  char *ref = NULL;
   char *pw = NULL;
   size_t pwcap = 0;
 
-  int pwlen = interactive_get_add_vals(&ref, &pw, &pwcap);
-  if (pwlen < 0) {
-    sodium_munlock(key, sizeof(key));
-    return -1;
-  }
+  printf("Password for '%s': ", ref);
+  int pwlen = secure_getpassline(&pw, &pwcap, stdin);
 
   unsigned char ciphertext[crypto_secretbox_MACBYTES + pwlen];
   unsigned char nonce[crypto_secretbox_NONCEBYTES];
+
+  if (pwlen < 1) {
+    fprintf(stderr, "password is required\n");
+
+    retcode = -1;
+    goto cleanup;
+  }
+
   if (pw_encrypt_secretbox(ciphertext, (const unsigned char *)pw, pwlen, nonce,
                            key) != 0) {
     fprintf(stderr, "subcmd_add_password: failed to encrypt pw\n");
 
-    sodium_munlock(key, sizeof(key));
-    sodium_munlock(pw, pwcap);
-    free(pw);
-    free(ref);
-    return -1;
+    retcode = -1;
+    goto cleanup;
   }
 
   sodium_munlock(key, sizeof(key));
@@ -558,7 +536,6 @@ int subcmd_add_password(const char *vname) {
       .vname = vname,
   };
   int pwid = db_insert_password(db, &pwdata);
-  free(ref);
 
   if (pwid < 0) {
     return -1;
@@ -566,6 +543,12 @@ int subcmd_add_password(const char *vname) {
 
   printf("Done. Password ID: %d\n", pwid);
   return 0;
+
+cleanup:
+  sodium_munlock(pw, pwcap);
+  free(pw);
+  sodium_munlock(key, sizeof(key));
+  return retcode;
 }
 
 // runs mkdir for the homedir/.passc directory. uses get_homedir; cwd will be
@@ -586,10 +569,11 @@ int passc_dirinit(void) {
   return 0;
 }
 
+// prints usage to stderr
 void perr_usage(const char *pname) {
   fprintf(stderr,
           "Usage:\n"
-          "  %s [-n vault_name] (add|rm|get) <password name>\n"
+          "  %s [-n vault_name] (add|rm|get) <reference, e.g. example.org>\n"
           "  %s [-n vault_name] ls\n"
           "\n"
           "Options:\n"
@@ -642,12 +626,23 @@ int main(int argc, char **argv) {
       return EXIT_FAILURE;
     }
   } else if (strcmp(subcmd, "add") == 0) {
-    if (subcmd_add_password(vault_name) < 0) {
-      fprintf(stderr, "failed to add to vault\n");
+    if (optind + 1 >= argc) {
+      fprintf(stderr, "%s: expected reference argument\n", pname);
+      perr_usage(pname);
+      return EXIT_FAILURE;
+    }
+
+    if (subcmd_add_password(argv[optind + 1], vault_name) < 0) {
+      fprintf(stderr, "failed to add to vault '%s'\n", vault_name);
       return EXIT_FAILURE;
     }
   } else if (strcmp(subcmd, "get") == 0) {
-    // TODO:
+    if (optind + 1 >= argc) {
+      fprintf(stderr, "%s: expected reference argument\n", pname);
+      perr_usage(pname);
+      return EXIT_FAILURE;
+    }
+    // TODO: implement get
   } else {
     fprintf(stderr, "%s: unknown subcommand '%s'\n", pname, subcmd);
     perr_usage(pname);
