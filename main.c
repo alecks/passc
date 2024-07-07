@@ -487,8 +487,9 @@ int make_db(const char *vname, sqlite3 **outhdl) {
 }
 
 // steps a stmt, printing the rows in a human-readable format, returning the
-// number of rows. returns -1 on error.
-int db_print_rows(sqlite3_stmt *stmt) {
+// number of rows. returns -1 on error. assumes the first col is a rowid.
+// last_rowid is set to the final rowid printed, or ignored if NULL.
+int db_print_rows(sqlite3_stmt *stmt, long *last_rowid) {
   int rowcount = 0;
 
   int rc = sqlite3_step(stmt);
@@ -496,9 +497,15 @@ int db_print_rows(sqlite3_stmt *stmt) {
     rowcount++;
     const int nocols = sqlite3_column_count(stmt);
 
-    // could use strcat here, probably not worth it for now
-    for (int i = 0; i < nocols; i++) {
+    long rowid = sqlite3_column_int(stmt, 0);
+    printf("%ld | ", rowid);
+    if (last_rowid) {
+      *last_rowid = rowid;
+    }
+
+    for (int i = 1; i < nocols; i++) {
       printf("%s ", sqlite3_column_text(stmt, i));
+
       if (i != nocols - 1) {
         printf("| ");
       }
@@ -514,9 +521,9 @@ int db_print_rows(sqlite3_stmt *stmt) {
   return rowcount;
 }
 
-// finds passwords matching the pattern %ref%, and asks the user to select one
-// using the pwid. if there is only one match, 0 is returned. returns -1 on err,
-// 0 if pwid not provided by user or one match, and pwid if ok.
+// finds passwords matching the pattern %ref%, and asks the user to select one.
+// if there is one match, it is returned immediately. returns -1 on error and
+// pwid if ok. should never return 0 unless this is used as a rowid in the db.
 long interactive_pw_selection(sqlite3 *db, const char *ref, const char *vname) {
   sqlite3_stmt *stmt = NULL;
   char *queryt = sqlite3_mprintf(
@@ -533,8 +540,9 @@ long interactive_pw_selection(sqlite3 *db, const char *ref, const char *vname) {
   sqlite3_free(queryt);
   queryt = NULL;
 
-  int pwcount = db_print_rows(stmt);
-  if (pwcount < 1) {
+  long pwid = -1;
+  int pwcount = db_print_rows(stmt, &pwid);
+  if (pwcount <= 0) {
     if (pwcount < 0) {
       fprintf(stderr, "interactive_pw_selection: failed to list pws: %s\n",
               sqlite3_errmsg(db));
@@ -550,7 +558,6 @@ long interactive_pw_selection(sqlite3 *db, const char *ref, const char *vname) {
   sqlite3_finalize(stmt);
   stmt = NULL;
 
-  long pwid = 0;
   if (pwcount != 1) {
     char *inp = NULL;
     size_t inpcap = 0;
@@ -583,7 +590,7 @@ int subcmd_list_passwords(sqlite3 *db, const char *vname) {
   }
   sqlite3_free(queryt);
 
-  if (db_print_rows(stmt) < 0) {
+  if (db_print_rows(stmt, NULL) < 0) {
     fprintf(stderr, "subcmd_list_passwords: failed to print rows: %s\n",
             sqlite3_errmsg(db));
     retcode = -1;
@@ -674,10 +681,9 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   }
 
   sqlite3_stmt *stmt;
-  char *queryt =
-      sqlite3_mprintf("SELECT pwid, ciphertext, nonce FROM passwords "
-                      "WHERE (pwid = %d OR ref = %Q) AND vname = %Q",
-                      pwid, ref, vname);
+  char *queryt = sqlite3_mprintf("SELECT ciphertext, nonce FROM passwords "
+                                 "WHERE pwid = %d AND vname = %Q",
+                                 pwid, vname);
 
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
     fprintf(stderr, "subcmd_get_password: failed to select cipher/nonce: %s\n",
@@ -695,10 +701,9 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
     return -1;
   }
 
-  pwid = sqlite3_column_int(stmt, 0);
-  const unsigned char *ciphertext = sqlite3_column_blob(stmt, 1);
-  const int ctlen = sqlite3_column_bytes(stmt, 1);
-  const unsigned char *nonce = sqlite3_column_blob(stmt, 2);
+  const unsigned char *ciphertext = sqlite3_column_blob(stmt, 0);
+  const int ctlen = sqlite3_column_bytes(stmt, 0);
+  const unsigned char *nonce = sqlite3_column_blob(stmt, 1);
 
   unsigned char key[crypto_secretbox_KEYBYTES];
   if (vault_authorise(db, key, sizeof(key), vname) < 0) {
