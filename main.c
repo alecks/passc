@@ -437,8 +437,7 @@ int vault_authorise(sqlite3 *dbhdl, unsigned char *key, size_t keysize,
   return 0;
 }
 
-// subcommand to add a new password to a vault. returns 0 if ok, -1 on error, -2
-// on invalid password.
+// subcommand to add a new password to a vault. returns 0 if ok, -1 on error.
 int subcmd_vault_add(const char *vname) {
   sqlite3 *db = NULL;
   if (make_db(vname, &db) < 0)
