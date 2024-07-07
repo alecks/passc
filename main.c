@@ -15,7 +15,7 @@
   "CREATE TABLE IF NOT EXISTS vaults"                                          \
   "(vname TEXT PRIMARY KEY, keyhash TEXT UNIQUE NOT NULL);"                    \
   "CREATE TABLE IF NOT EXISTS passwords ("                                     \
-  "pname TEXT PRIMARY KEY,"                                                    \
+  "pwid INTEGER PRIMARY KEY,"                                                  \
   "ref TEXT NOT NULL,"                                                         \
   "ciphertext BLOB NOT NULL,"                                                  \
   "vname INTEGER NOT NULL,"                                                    \
@@ -59,7 +59,7 @@ ssize_t secure_getpassline(char **lineptr, size_t *n, FILE *stream) {
   if (tcsetattr(fileno(stream), TCSAFLUSH, &new) != 0)
     return -1;
 
-  int nread = getline(lineptr, n, stream);
+  ssize_t nread = getline(lineptr, n, stream);
   if (nread > 0) {
     (*lineptr)[--nread] = '\0'; // replace \n
   }
@@ -388,7 +388,7 @@ int make_db(const char *vname, sqlite3 **outhdl) {
   return 0;
 }
 
-// prints refs and pnames to stdout; returns 0 if ok, -1 on error
+// prints refs and pwids to stdout; returns 0 if ok, -1 on error
 int subcmd_vault_list(const char *vname) {
   int retcode = 0;
 
@@ -398,7 +398,7 @@ int subcmd_vault_list(const char *vname) {
 
   sqlite3_stmt *stmt = NULL;
   char *queryt = sqlite3_mprintf(
-      "SELECT pname, ref FROM passwords WHERE vname = %Q", vname);
+      "SELECT pwid, ref FROM passwords WHERE vname = %Q", vname);
 
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
     fprintf(stderr, "subcmd_vault_list: couldn't prepare query: %s\n",
@@ -438,8 +438,41 @@ cleanup_db:
   return retcode;
 }
 
+// reads a reference and password from stdin into *ref and *pw. size of pw buf
+// read into *pwcap, used to sodium_munlock. retval is the length of the
+// password, or -1 on error. if non-negative val is returned, pw and ref must be
+// free()'d by the caller
+ssize_t interactive_get_add_vals(char **ref, char **pw, size_t *pwcap) {
+  size_t refcap = 0;
+
+  printf("Reference (e.g. example.org): ");
+  int reflen = getline(ref, &refcap, stdin);
+  if (reflen < 2) { // one character plus \n
+    fprintf(stderr, "reference is required\n");
+
+    free(ref);
+    return -1;
+  }
+  (*ref)[--reflen] = '\0';
+
+  printf("Password: ");
+  int pwlen = secure_getpassline(pw, pwcap, stdin);
+  if (pwlen < 1) {
+    fprintf(stderr, "password is required\n");
+
+    free(ref);
+    sodium_munlock(pw, *pwcap);
+    free(pw);
+    return -1;
+  }
+
+  return pwlen;
+}
+
 // subcommand to add a new password to a vault. returns 0 if ok, -1 on error.
 int subcmd_vault_add(const char *vname) {
+  int retcode = 0;
+
   sqlite3 *db = NULL;
   if (make_db(vname, &db) < 0)
     return -1;
@@ -448,12 +481,38 @@ int subcmd_vault_add(const char *vname) {
   sodium_mlock(key, sizeof(key));
 
   if (vault_authorise(db, key, sizeof(key), vname) < 0) {
+    sodium_munlock(key, sizeof(key));
     return -1;
   }
 
-  // TODO: encrypt & store
+  char *ref = NULL;
+  char *pw = NULL;
+  size_t pwcap = 0;
 
-  return 0;
+  int pwlen = interactive_get_add_vals(&ref, &pw, &pwcap);
+  if (pwlen < 0) {
+    return -1;
+  }
+
+  unsigned char ciphertext[crypto_secretbox_MACBYTES + pwlen];
+  unsigned char nonce[crypto_secretbox_NONCEBYTES];
+
+  randombytes_buf(nonce, sizeof(nonce));
+  if (crypto_secretbox_easy(ciphertext, (const unsigned char *)pw, pwlen, nonce,
+                            key) != 0) {
+    fprintf(stderr, "subcmd_vault_add: failed to encrypt pw\n");
+    retcode = -1;
+    goto cleanup;
+  }
+
+  printf("encrypted pass: %s\n", ciphertext);
+
+cleanup:
+  sodium_munlock(pw, pwcap);
+  free(pw);
+  free(ref);
+  sodium_munlock(key, sizeof(key));
+  return retcode;
 }
 
 // runs mkdir for the homedir/.passc directory. uses get_homedir; cwd will be
