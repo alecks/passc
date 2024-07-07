@@ -90,7 +90,7 @@ void get_homedir(char *out) {
   if (!dir) {
     dir = ".";
   }
-  snprintf(out, PATH_MAX, "%s", dir);
+  strcpy(out, dir);
 }
 
 int gen_new_salt(unsigned char *salt, size_t n, const char *filepath) {
@@ -428,9 +428,12 @@ int vault_authorise(sqlite3 *dbhdl, unsigned char *key, size_t keysize,
 
 // main function used for creating a db handle. runs db_init and
 // db_vault_init. callers responsibility to sqlite3_close if 0 returned (ok)
-int make_db(const char *vname, sqlite3 **outhdl) {
+int make_db(const char *confdir, const char *vname, sqlite3 **outhdl) {
+  char dbpath[PATH_MAX];
+  cwk_path_join(confdir, "passc.db", dbpath, sizeof(dbpath));
+
   sqlite3 *db = NULL;
-  if (db_init("passc.db", &db) < 0)
+  if (db_init(dbpath, &db) < 0)
     return -1;
 
   if (db_vault_init(db, vname) < 0) {
@@ -559,7 +562,6 @@ cleanup:
   return retcode;
 }
 
-// TODO: pass db to subcmds from main
 // TODO: put db in passc dir
 int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   sqlite3_stmt *stmt = NULL;
@@ -654,7 +656,7 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
 
 // runs mkdir for the homedir/.passc directory. uses get_homedir; cwd will be
 // used instead if unavailable. -1 on error, 0 if ok
-int passc_dirinit(void) {
+int passc_dirinit(char *out) {
   char pth[PATH_MAX];
   char homedir[PATH_MAX];
 
@@ -666,7 +668,9 @@ int passc_dirinit(void) {
     fprintf(stderr, "failed to create .passc directory at %s\n", pth);
     return -1;
   }
+
   verbosef("v: .passc dir available at %s\n", pth);
+  strcpy(out, pth);
   return 0;
 }
 
@@ -710,7 +714,8 @@ int main(int argc, char **argv) {
   if (!vault_name)
     vault_name = "main";
 
-  if (passc_dirinit() < 0)
+  char confdir[PATH_MAX];
+  if (passc_dirinit(confdir) < 0)
     return EXIT_FAILURE;
 
   // SUBCOMMAND MATCHING
@@ -721,7 +726,7 @@ int main(int argc, char **argv) {
   }
 
   sqlite3 *db = NULL;
-  if (make_db(vault_name, &db) < 0) {
+  if (make_db(confdir, vault_name, &db) < 0) {
     fprintf(stderr, "couldn't initialise database\n");
     return EXIT_FAILURE;
   }
