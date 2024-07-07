@@ -433,6 +433,29 @@ int make_db(const char *vname, sqlite3 **outhdl) {
   return 0;
 }
 
+int db_print_rows(sqlite3_stmt *stmt) {
+  int rc = sqlite3_step(stmt);
+  while (rc == SQLITE_ROW) {
+    int nocols = sqlite3_column_count(stmt);
+
+    // could use strcat here, probably not worth it for now
+    for (int i = 0; i < nocols; i++) {
+      printf("%s ", sqlite3_column_text(stmt, i));
+      if (i != nocols - 1) {
+        printf("| ");
+      }
+    }
+    printf("\n");
+
+    rc = sqlite3_step(stmt);
+  }
+
+  if (rc != SQLITE_DONE) {
+    return -1;
+  }
+  return 0;
+}
+
 // prints refs and pwids to stdout; returns 0 if ok, -1 on error
 int subcmd_list_passwords(const char *vname) {
   int retcode = 0;
@@ -455,26 +478,10 @@ int subcmd_list_passwords(const char *vname) {
   }
   sqlite3_free(queryt);
 
-  int rc = sqlite3_step(stmt);
-  while (rc == SQLITE_ROW) {
-    int nocols = sqlite3_column_count(stmt);
-
-    // could use strcat here, probably not worth it for now
-    for (int i = 0; i < nocols; i++) {
-      printf("%s ", sqlite3_column_text(stmt, i));
-      if (i != nocols - 1) {
-        printf("| ");
-      }
-    }
-    printf("\n");
-
-    rc = sqlite3_step(stmt);
-  }
-
-  if (rc != SQLITE_DONE) {
-    fprintf(stderr, "subcmd_vault_list: failed to advance query: %s\n",
+  if (db_print_rows(stmt) < 0) {
+    fprintf(stderr, "subcmd_list_passwords: failed to print rows: %s\n",
             sqlite3_errmsg(db));
-    retcode = -1;
+    return -1;
   }
 
   sqlite3_finalize(stmt);
@@ -510,7 +517,6 @@ int subcmd_add_password(const char *ref, const char *vname) {
 
   if (pwlen < 1) {
     fprintf(stderr, "password is required\n");
-
     retcode = -1;
     goto cleanup;
   }
@@ -518,7 +524,6 @@ int subcmd_add_password(const char *ref, const char *vname) {
   if (pw_encrypt_secretbox(ciphertext, (const unsigned char *)pw, pwlen, nonce,
                            key) != 0) {
     fprintf(stderr, "subcmd_add_password: failed to encrypt pw\n");
-
     retcode = -1;
     goto cleanup;
   }
@@ -536,7 +541,6 @@ int subcmd_add_password(const char *ref, const char *vname) {
       .vname = vname,
   };
   int pwid = db_insert_password(db, &pwdata);
-
   if (pwid < 0) {
     return -1;
   }
@@ -549,6 +553,11 @@ cleanup:
   free(pw);
   sodium_munlock(key, sizeof(key));
   return retcode;
+}
+
+int subcmd_get_password(const char *ref, const char *vname) {
+  printf("unimplemented %s %s", ref, vname);
+  return -1;
 }
 
 // runs mkdir for the homedir/.passc directory. uses get_homedir; cwd will be
@@ -642,7 +651,11 @@ int main(int argc, char **argv) {
       perr_usage(pname);
       return EXIT_FAILURE;
     }
-    // TODO: implement get
+
+    if (subcmd_get_password(argv[optind + 1], vault_name) < 0) {
+      fprintf(stderr, "failed to get password from vault '%s'\n", vault_name);
+      return EXIT_FAILURE;
+    }
   } else {
     fprintf(stderr, "%s: unknown subcommand '%s'\n", pname, subcmd);
     perr_usage(pname);
