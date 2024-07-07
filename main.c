@@ -67,6 +67,15 @@ ssize_t secure_getpassline(char **lineptr, size_t *linecap, FILE *stream) {
   return nread;
 }
 
+// same as getline, but does not retain \n
+ssize_t passc_getline(char **lineptr, size_t *linecap, FILE *stream) {
+  ssize_t nread = getline(lineptr, linecap, stream);
+  if (nread > 0) {
+    (*lineptr)[--nread] = '\0';
+  }
+  return nread;
+}
+
 // tries to get the homedir from passwd entry, otherwise $HOME, otherwise cwd.
 // expects out to be able to fit PATH_MAX
 void get_homedir(char *out) {
@@ -433,10 +442,15 @@ int make_db(const char *vname, sqlite3 **outhdl) {
   return 0;
 }
 
+// steps a stmt, printing the rows in a human-readable format, returning the
+// number of rows. returns -1 on error.
 int db_print_rows(sqlite3_stmt *stmt) {
+  int rowcount = 0;
+
   int rc = sqlite3_step(stmt);
   while (rc == SQLITE_ROW) {
-    int nocols = sqlite3_column_count(stmt);
+    rowcount++;
+    const int nocols = sqlite3_column_count(stmt);
 
     // could use strcat here, probably not worth it for now
     for (int i = 0; i < nocols; i++) {
@@ -453,7 +467,7 @@ int db_print_rows(sqlite3_stmt *stmt) {
   if (rc != SQLITE_DONE) {
     return -1;
   }
-  return 0;
+  return rowcount;
 }
 
 // prints refs and pwids to stdout; returns 0 if ok, -1 on error
@@ -481,7 +495,7 @@ int subcmd_list_passwords(const char *vname) {
   if (db_print_rows(stmt) < 0) {
     fprintf(stderr, "subcmd_list_passwords: failed to print rows: %s\n",
             sqlite3_errmsg(db));
-    return -1;
+    retcode = -1;
   }
 
   sqlite3_finalize(stmt);
@@ -503,6 +517,7 @@ int subcmd_add_password(const char *ref, const char *vname) {
 
   if (vault_authorise(db, key, sizeof(key), vname) < 0) {
     sodium_munlock(key, sizeof(key));
+    sqlite3_close(db);
     return -1;
   }
 
@@ -540,7 +555,9 @@ int subcmd_add_password(const char *ref, const char *vname) {
       .ref = ref,
       .vname = vname,
   };
-  int pwid = db_insert_password(db, &pwdata);
+  const int pwid = db_insert_password(db, &pwdata);
+  sqlite3_close(db);
+
   if (pwid < 0) {
     return -1;
   }
@@ -552,12 +569,113 @@ cleanup:
   sodium_munlock(pw, pwcap);
   free(pw);
   sodium_munlock(key, sizeof(key));
+  sqlite3_close(db);
   return retcode;
 }
 
+// TODO: pass db to subcmds from main
+// TODO: put db in passc dir
 int subcmd_get_password(const char *ref, const char *vname) {
-  printf("unimplemented %s %s", ref, vname);
-  return -1;
+  sqlite3 *db = NULL;
+  if (make_db(vname, &db) < 0)
+    return -1;
+
+  sqlite3_stmt *stmt = NULL;
+  char *queryt = sqlite3_mprintf(
+      "SELECT pwid, ref FROM passwords WHERE ref LIKE '%%%q%%'", ref); // '%r%'
+
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
+    fprintf(stderr, "subcmd_get_password: couldn't prepare stmt: %s\n",
+            sqlite3_errmsg(db));
+
+    sqlite3_free(queryt);
+    sqlite3_close(db);
+    return -1;
+  }
+  sqlite3_free(queryt);
+  queryt = NULL;
+
+  int pwcount = db_print_rows(stmt);
+  if (pwcount < 1) {
+    if (pwcount < 0) {
+      fprintf(stderr, "subcmd_get_password: failed to list pws: %s\n",
+              sqlite3_errmsg(db));
+    } else {
+      fprintf(stderr,
+              "no passwords with that reference -- try using ls subcommand\n");
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return -1;
+  }
+
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  long pwid = 0;
+  if (pwcount != 1) {
+    char *inp = NULL;
+    size_t inpcap = 0;
+
+    printf("Select password: ");
+    if (passc_getline(&inp, &inpcap, stdin) < 0) {
+      fprintf(stderr, "subcmd_get_password: couldn't read from stdin\n");
+      sqlite3_close(db);
+      return -1;
+    }
+    pwid = strtol(inp, NULL, 10);
+  }
+
+  queryt = sqlite3_mprintf("SELECT pwid, ciphertext, nonce FROM passwords "
+                           "WHERE pwid = %d OR ref = %Q",
+                           pwid, ref);
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
+    fprintf(stderr, "subcmd_get_password: failed to select cipher/nonce: %s\n",
+            sqlite3_errmsg(db));
+
+    free(queryt);
+    sqlite3_close(db);
+    return -1;
+  }
+  free(queryt);
+  queryt = NULL;
+
+  if (sqlite3_step(stmt) != SQLITE_ROW) {
+    fprintf(stderr, "could not get password\n");
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return -1;
+  }
+
+  pwid = sqlite3_column_int(stmt, 0);
+  const unsigned char *ciphertext = sqlite3_column_blob(stmt, 1);
+  const int ctlen = sqlite3_column_bytes(stmt, 1);
+  const unsigned char *nonce = sqlite3_column_blob(stmt, 2);
+
+  unsigned char key[crypto_secretbox_KEYBYTES];
+  if (vault_authorise(db, key, sizeof(key), vname) < 0) {
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return -1;
+  }
+
+  unsigned char pw[ctlen - crypto_secretbox_MACBYTES + 1];
+  if (crypto_secretbox_open_easy(pw, ciphertext, ctlen, nonce, key) != 0) {
+    fprintf(stderr, "FAILED to verify & decrypt. This should not be possible; "
+                    "the passphrase matched. It is most likely that the salt "
+                    "or ciphertext has been corrupted.\n");
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return -1;
+  }
+  pw[sizeof(pw) - 1] = '\0';
+
+  printf("\nPWID: %ld\n--------\n%s\n", pwid, pw);
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+  return 0;
 }
 
 // runs mkdir for the homedir/.passc directory. uses get_homedir; cwd will be
