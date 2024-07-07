@@ -22,17 +22,6 @@
   "vname INTEGER NOT NULL,"                                                    \
   "FOREIGN KEY (vname) REFERENCES vaults (vname));"
 
-void perr_usage(const char *pname) {
-  fprintf(stderr,
-          "Usage:\n"
-          "  %s [-n vault_name] (add|rm|get) <password name>\n"
-          "  %s [-n vault_name] ls\n"
-          "\n"
-          "Options:\n"
-          "  -v Enable verbose logging.\n",
-          pname, pname); // could use %n$, but this is a compiler warning
-}
-
 int _passc_log_level = 0;
 
 // verbose format logging if _passc_log_level is >= 1
@@ -594,6 +583,17 @@ int passc_dirinit(void) {
   }
   verbosef("v: .passc dir available at %s\n", pth);
   return 0;
+}
+
+void perr_usage(const char *pname) {
+  fprintf(stderr,
+          "Usage:\n"
+          "  %s [-n vault_name] (add|rm|get) <password name>\n"
+          "  %s [-n vault_name] ls\n"
+          "\n"
+          "Options:\n"
+          "  -v Enable verbose logging.\n",
+          pname, pname); // could use %n$, but this is a compiler warning
 }
 
 int main(int argc, char **argv) {
