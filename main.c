@@ -18,6 +18,7 @@
   "pwid INTEGER PRIMARY KEY,"                                                  \
   "ref TEXT NOT NULL,"                                                         \
   "ciphertext BLOB NOT NULL,"                                                  \
+  "nonce BLOB NOT NULL,"                                                       \
   "vname INTEGER NOT NULL,"                                                    \
   "FOREIGN KEY (vname) REFERENCES vaults (vname));"
 
@@ -274,7 +275,7 @@ int db_vault_create(sqlite3 *db, const char *vname) {
   char *queryt = sqlite3_mprintf(
       "INSERT INTO vaults (vname, keyhash) VALUES (%Q, %Q)", vname, keyhash);
 
-  if (sqlite3_prepare(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
       sqlite3_step(stmt) != SQLITE_DONE) {
     fprintf(stderr, "db_vault_create: couldn't insert vault: %s\n",
             sqlite3_errmsg(db));
@@ -338,7 +339,8 @@ int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
 
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
       sqlite3_step(stmt) != SQLITE_ROW) {
-    fprintf(stderr, "failed to select keyhash: %s\n", sqlite3_errmsg(db));
+    fprintf(stderr, "db_get_keyhash: failed to select keyhash: %s\n",
+            sqlite3_errmsg(db));
 
     retcode = -1;
     goto cleanup;
@@ -471,8 +473,6 @@ ssize_t interactive_get_add_vals(char **ref, char **pw, size_t *pwcap) {
 
 // subcommand to add a new password to a vault. returns 0 if ok, -1 on error.
 int subcmd_vault_add(const char *vname) {
-  int retcode = 0;
-
   sqlite3 *db = NULL;
   if (make_db(vname, &db) < 0)
     return -1;
@@ -491,6 +491,7 @@ int subcmd_vault_add(const char *vname) {
 
   int pwlen = interactive_get_add_vals(&ref, &pw, &pwcap);
   if (pwlen < 0) {
+    sodium_munlock(key, sizeof(key));
     return -1;
   }
 
@@ -501,18 +502,46 @@ int subcmd_vault_add(const char *vname) {
   if (crypto_secretbox_easy(ciphertext, (const unsigned char *)pw, pwlen, nonce,
                             key) != 0) {
     fprintf(stderr, "subcmd_vault_add: failed to encrypt pw\n");
-    retcode = -1;
-    goto cleanup;
+
+    sodium_munlock(pw, pwcap);
+    free(pw);
+    free(ref);
+    sodium_munlock(key, sizeof(key));
+    return -1;
   }
 
-  printf("encrypted pass: %s\n", ciphertext);
-
-cleanup:
+  sodium_munlock(key, sizeof(key));
   sodium_munlock(pw, pwcap);
   free(pw);
+
+  sqlite3_stmt *stmt = NULL;
+  char *queryt = sqlite3_mprintf("INSERT INTO PASSWORDS (ref, vname, "
+                                 "ciphertext, nonce) VALUES (%Q, %Q, ?, ?)",
+                                 ref, vname);
   free(ref);
-  sodium_munlock(key, sizeof(key));
-  return retcode;
+
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
+    fprintf(stderr, "subcmd_vault_add: failed to prepare query: %s\n",
+            sqlite3_errmsg(db));
+    sqlite3_free(queryt);
+    return -1;
+  }
+  sqlite3_free(queryt);
+
+  sqlite3_bind_blob(stmt, 1, ciphertext, sizeof(ciphertext), SQLITE_STATIC);
+  sqlite3_bind_blob(stmt, 2, nonce, sizeof(nonce), SQLITE_STATIC);
+
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    fprintf(stderr, "subcmd_vault_add: failed to insert pw: %s",
+            sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+    return -1;
+  }
+
+  printf("Done. Password ID: %lld\n", sqlite3_last_insert_rowid(db));
+
+  sqlite3_finalize(stmt);
+  return 0;
 }
 
 // runs mkdir for the homedir/.passc directory. uses get_homedir; cwd will be
