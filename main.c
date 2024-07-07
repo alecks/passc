@@ -20,7 +20,8 @@
   "ciphertext BLOB NOT NULL,"                                                  \
   "nonce BLOB NOT NULL,"                                                       \
   "vname INTEGER NOT NULL,"                                                    \
-  "FOREIGN KEY (vname) REFERENCES vaults (vname));"
+  "FOREIGN KEY (vname) REFERENCES vaults (vname));"                            \
+  "CREATE INDEX IF NOT EXISTS refidx ON passwords (ref);"
 
 int _passc_log_level = 0;
 
