@@ -636,6 +636,7 @@ int subcmd_add_password(sqlite3 *db, const char *ref, const char *vname) {
     goto cleanup;
   }
 
+  verbosef("v: encrypting password\n");
   if (pw_encrypt_secretbox(ciphertext, (const unsigned char *)pw, pwlen, nonce,
                            key) != 0) {
     fprintf(stderr, "subcmd_add_password: failed to encrypt pw\n");
@@ -646,6 +647,7 @@ int subcmd_add_password(sqlite3 *db, const char *ref, const char *vname) {
   sodium_munlock(key, sizeof(key));
   sodium_munlock(pw, pwcap);
   free(pw);
+  verbosef("v: password has been encrypted\n");
 
   PasswordData pwdata = {
       .ciphertext = ciphertext,
@@ -740,8 +742,10 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
     return -1;
   }
 
+  verbosef("v: decrypting password\n");
   unsigned char pw[ctlen - crypto_secretbox_MACBYTES + 1];
   sodium_mlock(pw, sizeof(pw));
+
   if (crypto_secretbox_open_easy(pw, ciphertext, ctlen, nonce, key) != 0) {
     fprintf(stderr, "FAILED to verify & decrypt. This should not be possible; "
                     "the passphrase matched. It is most likely that the salt "
