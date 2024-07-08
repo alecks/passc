@@ -12,8 +12,13 @@
 
 #define MIGRATION_QUERY                                                        \
   "PRAGMA foreign_keys = ON;"                                                  \
-  "CREATE TABLE IF NOT EXISTS vaults"                                          \
-  "(vname TEXT PRIMARY KEY, keyhash TEXT UNIQUE NOT NULL);"                    \
+  "CREATE TABLE IF NOT EXISTS vaults ("                                        \
+  "vname TEXT PRIMARY KEY,"                                                    \
+  "keyhash TEXT UNIQUE NOT NULL,"                                              \
+  "memlimit INTEGER NOT NULL,"                                                 \
+  "opslimit INTEGER NOT NULL,"                                                 \
+  "alg INTEGER NOT NULL);"                                                     \
+                                                                               \
   "CREATE TABLE IF NOT EXISTS passwords ("                                     \
   "pwid INTEGER PRIMARY KEY,"                                                  \
   "ref TEXT NOT NULL,"                                                         \
@@ -21,6 +26,7 @@
   "nonce BLOB NOT NULL,"                                                       \
   "vname INTEGER NOT NULL,"                                                    \
   "FOREIGN KEY (vname) REFERENCES vaults (vname));"                            \
+                                                                               \
   "CREATE INDEX IF NOT EXISTS refidx ON passwords (ref);"
 
 // tries to get the homedir from passwd entry, otherwise $HOME, otherwise cwd.
