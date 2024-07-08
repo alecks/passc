@@ -674,6 +674,8 @@ cleanup:
 }
 
 int subcmd_rm_password(sqlite3 *db, const char *ref, const char *vname) {
+  int retcode = 0;
+
   sqlite3_int64 pwid = interactive_pw_selection(db, ref, vname);
   if (pwid < 0) {
     return -1;
@@ -695,13 +697,16 @@ int subcmd_rm_password(sqlite3 *db, const char *ref, const char *vname) {
     fprintf(stderr, "subcmd_rm_password: failed to delete pw: %s\n",
             sqlite3_errmsg(db));
 
-    free(queryt);
-    sqlite3_finalize(stmt);
-    return -1;
+    retcode = -1;
+    goto cleanup;
   }
 
   verbosef("v: pw has been deleted\n");
-  return 0;
+
+cleanup:
+  sqlite3_free(queryt);
+  sqlite3_finalize(stmt);
+  return retcode;
 }
 
 // gets a password from the db and decrypts. -1 on err, 0 if ok.
