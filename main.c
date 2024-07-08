@@ -116,7 +116,9 @@ ssize_t secure_getpassline(char **lineptr, size_t *linecap, FILE *stream) {
   }
   printf("\n");
 
-  if (sodium_mlock(*lineptr, *linecap) != 0) {
+  if (sodium_mlock(*lineptr, *linecap) == 0) {
+    verbosef("v: sodium_mlock ok\n");
+  } else {
     verbosef("v: sodium_mlock failed; your platform may not support this. "
              "error: %s\n",
              strerror(errno));
