@@ -808,12 +808,12 @@ int main(int argc, char **argv) {
 
   // OPTION MATCHING
   int opt;
-  while ((opt = getopt(argc, argv, "vn::")) != -1) {
+  while ((opt = getopt(argc, argv, "Vv::")) != -1) {
     switch (opt) {
-    case 'n':
+    case 'v':
       vault_name = optarg;
       break;
-    case 'v':
+    case 'V':
       conf_set_loglevel(1);
       break;
     default: // '?'
