@@ -13,4 +13,5 @@ CMakeUserPresets.json
 build
 .cache
 .clangd
-passc.db
+DS_Store
+.passc
