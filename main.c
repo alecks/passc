@@ -155,7 +155,7 @@ ssize_t secure_getpassline(char **lineptr, size_t *linecap, FILE *stream) {
 }
 
 // generates a new salt, writing it to filepath. -1 on err, 0 if ok.
-int write_new_salt(unsigned char *salt, size_t n, const char *filepath) {
+int salt_create(unsigned char *salt, size_t n, const char *filepath) {
   int retcode = 0;
 
   verbosef("v: making new random salt\n");
@@ -163,11 +163,11 @@ int write_new_salt(unsigned char *salt, size_t n, const char *filepath) {
 
   FILE *fp = fopen(filepath, "w");
   if (!fp) {
-    perror("gen_new_salt: couldn't open salt file for writing");
+    perror("salt_create: couldn't open salt file for writing");
     return -1;
   }
   if (fwrite(salt, 1, n, fp) != n) {
-    fprintf(stderr, "gen_new_salt: unexpected num of bytes written\n");
+    fprintf(stderr, "salt_create: unexpected num of bytes written\n");
     retcode = -1;
     goto cleanup;
   }
@@ -180,7 +180,7 @@ cleanup:
 }
 
 // tries to find a salt, or creates one with write_new_salt. 0 if ok, -1 on err.
-int get_or_create_salt(unsigned char *salt, size_t n, const char *vname) {
+int salt_get_or_create(unsigned char *salt, size_t n, const char *vname) {
   int retcode = 0;
 
   char filepath[PATH_MAX];
@@ -189,18 +189,18 @@ int get_or_create_salt(unsigned char *salt, size_t n, const char *vname) {
 
   FILE *fp = fopen(filepath, "r");
   if (!fp) {
-    return write_new_salt(salt, n, filepath);
+    return salt_create(salt, n, filepath);
   }
 
   size_t readlen = fread(salt, 1, n, fp);
   if (ferror(fp) != 0) {
-    perror("get_or_create_salt: failed to read salt file");
+    perror("salt_get_or_create: failed to read salt file");
     retcode = -1;
     goto cleanup;
   } else if (readlen != n) {
     fprintf(
         stderr,
-        "get_or_create_salt: read less bytes than required from salt file\n");
+        "salt_get_or_create: read less bytes than required from salt file\n");
     retcode = -1;
     goto cleanup;
   }
@@ -215,7 +215,7 @@ cleanup:
 // quite an ugly function, should create some form of structured validation
 // asks the user for an opslimit and memlimit; if unprovided or unparseable,
 // defaults to MODERATE. returns -1 if out of bounds, 0 if ok.
-int interactive_get_vaultoptions(unsigned int *opslimit, size_t *memlimit) {
+int interactive_get_vaultopts(unsigned int *opslimit, size_t *memlimit) {
   char *opsinp = NULL;
   size_t opscap = 0;
 
@@ -260,9 +260,8 @@ typedef struct VaultOptions {
 
 // gets vault options from the user, inserts into db, and writes into vopts.
 // returns -1 on err, 0 if ok.
-int create_vaultoptions(sqlite3 *db, VaultOptions *vopts) {
-  if (interactive_get_vaultoptions(&(vopts->opslimit), &(vopts->memlimit)) <
-      0) {
+int vaultopts_create(sqlite3 *db, VaultOptions *vopts) {
+  if (interactive_get_vaultopts(&(vopts->opslimit), &(vopts->memlimit)) < 0) {
     return -1;
   }
   vopts->alg = crypto_pwhash_ALG_DEFAULT; // use recommended alg
@@ -275,7 +274,7 @@ int create_vaultoptions(sqlite3 *db, VaultOptions *vopts) {
 
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
       sqlite3_step(stmt) != SQLITE_DONE) {
-    fprintf(stderr, "create_vaultoptions: failed to insert vaultoptions: %s\n",
+    fprintf(stderr, "vaultopts_create: failed to insert vaultoptions: %s\n",
             sqlite3_errmsg(db));
 
     sqlite3_finalize(stmt);
@@ -289,14 +288,14 @@ int create_vaultoptions(sqlite3 *db, VaultOptions *vopts) {
 
 // gets vault options from db, otherwise calls create_vaultoptions. returns -1
 // on err, 0 if ok. expects vopts->name to be set.
-int get_or_create_vaultoptions(sqlite3 *db, VaultOptions *vopts) {
+int vaultopts_get_or_create(sqlite3 *db, VaultOptions *vopts) {
   sqlite3_stmt *stmt;
   char *queryt = sqlite3_mprintf(
       "SELECT opslimit, memlimit, alg FROM vaults WHERE vname = %Q",
       vopts->name);
 
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
-    fprintf(stderr, "get_or_create_vaultoptions: failed to prepare query\n");
+    fprintf(stderr, "vaultopts_get_or_create: failed to prepare query\n");
     sqlite3_free(queryt);
     return -1;
   }
@@ -319,12 +318,12 @@ int get_or_create_vaultoptions(sqlite3 *db, VaultOptions *vopts) {
 
   if (rc == SQLITE_DONE) {
     // done, no rows; create new vault
-    return create_vaultoptions(db, vopts);
+    return vaultopts_create(db, vopts);
   }
 
   // neither SQLITE_DONE nor SQLITE_ROW, fail
   fprintf(stderr,
-          "get_or_create_vaultoptions: failed to select vault options from "
+          "vaultopts_get_or_create: failed to select vault options from "
           "db: %s\n",
           sqlite3_errmsg(db));
   return -1;
@@ -335,7 +334,7 @@ int get_or_create_vaultoptions(sqlite3 *db, VaultOptions *vopts) {
 int pp_derivekey(unsigned char *out, size_t outlen, char *passphrase,
                  size_t pplen, VaultOptions *vopts) {
   unsigned char salt[crypto_pwhash_SALTBYTES];
-  if (get_or_create_salt(salt, sizeof(salt), vopts->name) < 0) {
+  if (salt_get_or_create(salt, sizeof(salt), vopts->name) < 0) {
     return -1;
   }
 
@@ -397,7 +396,7 @@ cleanup:
 
 // same as interactive_derivekey, except discards the key and returns the hash
 // of the key instead. 0 if ok, -1 on error.
-int interactive_derive_and_hash(char *outkeyhash, VaultOptions *vopts) {
+int interactive_derivekey_hash(char *outkeyhash, VaultOptions *vopts) {
   int retcode = 0;
   unsigned char key[crypto_secretbox_KEYBYTES];
   sodium_mlock(key, sizeof(key));
@@ -411,7 +410,7 @@ int interactive_derive_and_hash(char *outkeyhash, VaultOptions *vopts) {
   // the vault, we can check if it is the correct passphrase
   if (dk_keyhash(outkeyhash, key, sizeof(key)) != 0) {
     fprintf(stderr,
-            "interactive_derive_and_hash: failed to hash derived key, OOM?\n");
+            "interactive_derivekey_hash: failed to hash derived key, OOM?\n");
     retcode = -1;
     goto cleanup;
   }
@@ -442,7 +441,7 @@ int db_migrate_up(sqlite3 *db) {
 
 // opens the db and migrates up. callers responsibility to run
 // sqlite3_close, unless return value is <0.
-int db_init(const char *filename, sqlite3 **outhdl) {
+int db_open(const char *filename, sqlite3 **outhdl) {
   sqlite3 *db = NULL;
   int rc = sqlite3_open_v2(filename, &db,
                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
@@ -462,7 +461,7 @@ int db_init(const char *filename, sqlite3 **outhdl) {
 // that should be used for creating new vaults. can also be used if the vault is
 // half-made, i.e. the program was terminated after inserting the vault options
 // but before adding the keyhash
-int make_new_vault(sqlite3 *db, const char *vname) {
+int vault_create(sqlite3 *db, const char *vname) {
   int retcode = 0;
   char keyhash[crypto_pwhash_STRBYTES];
 
@@ -471,12 +470,12 @@ int make_new_vault(sqlite3 *db, const char *vname) {
 
   VaultOptions vopts = {.name = vname};
   // create the vault options
-  if (get_or_create_vaultoptions(db, &vopts) < 0) {
+  if (vaultopts_get_or_create(db, &vopts) < 0) {
     return -1;
   }
 
   // read passphrase from user, derive secret key and hash secret key
-  if (interactive_derive_and_hash(keyhash, &vopts) < 0) {
+  if (interactive_derivekey_hash(keyhash, &vopts) < 0) {
     return -1;
   }
 
@@ -487,7 +486,7 @@ int make_new_vault(sqlite3 *db, const char *vname) {
 
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
       sqlite3_step(stmt) != SQLITE_DONE) {
-    fprintf(stderr, "make_new_vault: couldn't add keyhash to vault: %s\n",
+    fprintf(stderr, "vault_create: couldn't add keyhash to vault: %s\n",
             sqlite3_errmsg(db));
 
     retcode = -1;
@@ -504,7 +503,7 @@ cleanup:
 
 // checks if a vault exists, creates if it doesn't. returns 1 if already exists,
 // 0 on create, -1 on error.
-int db_vault_init(sqlite3 *db, const char *vname) {
+int vault_init(sqlite3 *db, const char *vname) {
   // instead of 1, we select keyhash. this is in case the program was terminated
   // after the options were inserted, but before the keyhash was added.
   sqlite3_stmt *stmt = NULL;
@@ -512,7 +511,7 @@ int db_vault_init(sqlite3 *db, const char *vname) {
       sqlite3_mprintf("SELECT keyhash FROM vaults WHERE vname = %Q", vname);
 
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
-    fprintf(stderr, "db_vault_init: could not prepare query: %s\n",
+    fprintf(stderr, "vault_init: could not prepare query: %s\n",
             sqlite3_errmsg(db));
 
     sqlite3_free(queryt);
@@ -525,12 +524,12 @@ int db_vault_init(sqlite3 *db, const char *vname) {
   if (rc == SQLITE_DONE ||
       (rc == SQLITE_ROW && sqlite3_column_type(stmt, 0) == SQLITE_NULL)) {
     printf("vault '%s' does not exist. creating...\n", vname);
-    retcode = make_new_vault(db, vname);
+    retcode = vault_create(db, vname);
   } else if (rc == SQLITE_ROW) {
     verbosef("v: vault found, continuing\n");
     retcode = 1;
   } else {
-    fprintf(stderr, "db_vault_init: failed to advance query: %s\n",
+    fprintf(stderr, "vault_init: failed to advance query: %s\n",
             sqlite3_errmsg(db));
     retcode = -1;
   }
@@ -607,12 +606,12 @@ sqlite3_int64 db_insert_password(sqlite3 *db, PasswordData *pw) {
 
 // asks user for passphrase, derives key and verifies this against the db. key
 // is written to key param. returns -1 on error, -2 if unauthorised, 0 if ok.
-int vault_authorise(sqlite3 *db, unsigned char *key, size_t keysize,
-                    const char *vname) {
+int interactive_vault_auth(sqlite3 *db, unsigned char *key, size_t keysize,
+                           const char *vname) {
   char dbhash[crypto_pwhash_STRBYTES];
 
   VaultOptions vopts = {.name = vname};
-  if (get_or_create_vaultoptions(db, &vopts) < 0) {
+  if (vaultopts_get_or_create(db, &vopts) < 0) {
     return -1;
   }
 
@@ -631,22 +630,22 @@ int vault_authorise(sqlite3 *db, unsigned char *key, size_t keysize,
 }
 
 // calls vault_authorise, expecting a key of size crypto_secretbox_KEYBYTES.
-int vault_authorise_discardkey(sqlite3 *dbhdl, const char *vname) {
+int interactive_vault_auth_discard(sqlite3 *dbhdl, const char *vname) {
   unsigned char key[crypto_secretbox_KEYBYTES];
-  return vault_authorise(dbhdl, key, sizeof(key), vname);
+  return interactive_vault_auth(dbhdl, key, sizeof(key), vname);
 }
 
 // main function used for creating a db handle. runs db_init and
 // db_vault_init. callers responsibility to sqlite3_close if 0 returned (ok)
-int make_db(const char *vname, sqlite3 **outhdl) {
+int db_init(const char *vname, sqlite3 **outhdl) {
   char dbpath[PATH_MAX];
   cwk_path_join(conf_get()->datadir, "passc.db", dbpath, sizeof(dbpath));
 
   sqlite3 *db = NULL;
-  if (db_init(dbpath, &db) < 0)
+  if (db_open(dbpath, &db) < 0)
     return -1;
 
-  if (db_vault_init(db, vname) < 0) {
+  if (vault_init(db, vname) < 0) {
     sqlite3_close(db);
     return -1;
   }
@@ -760,7 +759,7 @@ int subcmd_list_passwords(sqlite3 *db, const char *vname) {
       "SELECT pwid, ref FROM passwords WHERE vname = %Q", vname);
 
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
-    fprintf(stderr, "subcmd_vault_list: couldn't prepare query: %s\n",
+    fprintf(stderr, "subcmd_list_passwords: couldn't prepare query: %s\n",
             sqlite3_errmsg(db));
 
     sqlite3_free(queryt);
@@ -785,7 +784,7 @@ int subcmd_add_password(sqlite3 *db, const char *ref, const char *vname) {
   unsigned char key[crypto_secretbox_KEYBYTES];
   sodium_mlock(key, sizeof(key));
 
-  if (vault_authorise(db, key, sizeof(key), vname) < 0) {
+  if (interactive_vault_auth(db, key, sizeof(key), vname) < 0) {
     sodium_munlock(key, sizeof(key));
     return -1;
   }
@@ -854,7 +853,7 @@ int subcmd_rm_password(sqlite3 *db, const char *ref, const char *vname) {
          "this is, use the 'get' subcommand to decrypt it before deletion.\n",
          pwid);
 
-  if (vault_authorise_discardkey(db, vname) < 0) {
+  if (interactive_vault_auth_discard(db, vname) < 0) {
     return -1;
   }
 
@@ -911,7 +910,7 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   const unsigned char *nonce = sqlite3_column_blob(stmt, 1);
 
   unsigned char key[crypto_secretbox_KEYBYTES];
-  if (vault_authorise(db, key, sizeof(key), vname) < 0) {
+  if (interactive_vault_auth(db, key, sizeof(key), vname) < 0) {
     sqlite3_finalize(stmt);
     return -1;
   }
@@ -995,7 +994,7 @@ int main(int argc, char **argv) {
   }
 
   sqlite3 *db = NULL;
-  if (make_db(vault_name, &db) < 0) {
+  if (db_init(vault_name, &db) < 0) {
     fprintf(stderr, "couldn't initialise database\n");
     return EXIT_FAILURE;
   }
