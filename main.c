@@ -787,7 +787,7 @@ typedef struct PasscSubcmd {
 } PasscSubcmd;
 
 int main(int argc, char **argv) {
-  char *pname = argv[0];
+  const char *pname = argv[0];
   if (sodium_init() < 0) {
     fprintf(stderr, "%s: sodium_init failed\n", pname);
     return EXIT_FAILURE;
