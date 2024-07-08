@@ -14,13 +14,13 @@ $ passc ls
 
 This will create a new vault, 'main', and ask you to specify a passphrase. It will list nothing as there are not yet any passwords in the vault.
 
-To use a different vault, use the `-n` flag, like so:
+To use a different vault, use the `-V` flag, like so:
 
 ```
-$ passc -nVault ls
+$ passc -Vmyvault ls
 ```
 
-This flag can be used in all of the subcommands below, otherwise defaulting to 'main'. `passc` uses GCC-style flags, so spaces are not allowed: `-nSecrets` is correct.
+This flag can be used in all of the subcommands below, otherwise defaulting to 'main'. `passc` uses GCC-style flags, so spaces are not allowed: `-Vvault` is correct.
 
 ## Adding a password
 

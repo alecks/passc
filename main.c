@@ -779,11 +779,11 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
 void perr_usage(const char *pname) {
   fprintf(stderr,
           "Usage:\n"
-          "  %s [-n vault_name] (add|rm|get) <reference, e.g. example.org>\n"
-          "  %s [-n vault_name] ls\n"
+          "  %s [-v vault_name] (add|rm|get) <reference, e.g. example.org>\n"
+          "  %s [-v vault_name] ls\n"
           "\n"
           "Options:\n"
-          "  -v Enable verbose logging.\n",
+          "  -V Enable verbose logging.\n",
           pname, pname); // could use %n$, but this is a compiler warning
 }
 
