@@ -10,14 +10,24 @@ A vault is a place with a unique passphrase used to store passwords. To create a
 
 ```
 $ passc ls
+vault 'main' does not exist. creating...
+
+KEY CREATION: A key will be derived from your given passphrase.
+Ensure this is different to those used by other vaults.
+OPSLIMIT (moderate):
+MEMLIMIT (moderate):
+
+Enter passphrase for vault:
 ```
+
+> It is highly recommended to skip past the OPSLIMIT and MEMLIMIT questions; these will default to `moderate` if you do not provide a value. Otherwise, it expects an integer. The default option requires 256MiB of RAM and takes about 2 seconds to derive a key with an M3 Pro chip. If you really require your passphrase to be harder to brute-force or have limited RAM, you can increase or decrease these values. See the [libsodium docs](https://doc.libsodium.org/password_hashing/default_phf#guidelines-for-choosing-the-parameters) for more information.
 
 This will create a new vault, 'main', and ask you to specify a passphrase. It will list nothing as there are not yet any passwords in the vault.
 
-To use a different vault, use the `-v` flag, like so:
+To use a different vault name, use the `-v` flag, like so:
 
 ```
-$ passc -vMyVault ls
+$ passc -vMyVault <subcommand>
 ```
 
 This flag can be used in all of the subcommands below, otherwise defaulting to 'main'. `passc` uses GCC-style flags, so spaces are not allowed: `-vVault` is correct.
@@ -93,4 +103,4 @@ This password will then be deleted.
 
 ## Recovering from a passphrase leak
 
-If your passphrase has been leaked (but not your derived secret key), it is possible to retain a minimal form of security by ensuring the `~/.passc/salt` file is not accessible. This salt is mixed in with your passphrase when deriving your secret key. (see [todos](./todos.md) for `rotate` subcommand)
+If your passphrase has been leaked (but not your derived secret key), it is possible to retain a minimal form of security by ensuring the `~/.passc/salts/<vault name>` file is not accessible. This salt is mixed in with your passphrase when deriving your secret key. (see [todos](./todos.md) for `rotate` subcommand)

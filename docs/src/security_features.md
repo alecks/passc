@@ -1,6 +1,6 @@
 # Security features
 
-`passc` tries to keep plaintext passwords and secret keys in memory for as little time as possible. Deriving the secret key uses `crypto_pwhash_OPSLIMIT_MODERATE` and `crypto_pwhash_MEMLIMIT_MODERATE`, which requires 256MiB of RAM. This can be increased in the source code to be `SENSITIVE`, which takes much longer and requires 1024MiB of RAM. To hash the secret key (used for verification), `INTERACTIVE` is used. This is much faster.
+`passc` tries to keep plaintext passwords and secret keys in memory for as little time as possible. Deriving the secret key uses `crypto_pwhash_OPSLIMIT_MODERATE` and `crypto_pwhash_MEMLIMIT_MODERATE` by default, which requires 256MiB of RAM and takes around 2 seconds on an M3 Pro chip. This can be increased upon creation of a passphrase. To hash the secret key (used for verification), `INTERACTIVE` is used. This is much faster.
 
 ### `sodium_mlock`
 
