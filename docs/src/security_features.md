@@ -4,6 +4,6 @@
 
 ### `sodium_mlock`
 
-Sensitive data in memory is locked using `sodium_mlock`. Some systems do not support this. Enabling verbose logging (`-v`) will show whether it is supported. This helps avoid swapping sensitive memory to disk. See [libsodium's secure memory docs](https://doc.libsodium.org/memory_management) for more information.
+Sensitive data in memory is locked using `sodium_mlock`. Some systems do not support this. Enabling verbose logging (`-V`) will show whether it is supported. This helps avoid swapping sensitive memory to disk. See [libsodium's secure memory docs](https://doc.libsodium.org/memory_management) for more information.
 
 `sodium_memzero` is always called regardless of whether `sodium_mlock` fails, attempting to overwrite sensitive memory after use.
