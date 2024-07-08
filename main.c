@@ -764,16 +764,6 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   return 0;
 }
 
-typedef int (*SubcmdHandler)(sqlite3 *db, const char *arg,
-                             const char *vault_name);
-typedef int (*SubcmdHandlerNoArg)(sqlite3 *db, const char *vault_name);
-
-typedef struct PasscSubcmd {
-  const char *name;
-  SubcmdHandler handler;
-  SubcmdHandlerNoArg handler_noarg;
-} PasscSubcmd;
-
 // prints usage to stderr
 void perr_usage(const char *pname) {
   fprintf(stderr,
@@ -785,6 +775,16 @@ void perr_usage(const char *pname) {
           "  -v Enable verbose logging.\n",
           pname, pname); // could use %n$, but this is a compiler warning
 }
+
+typedef int (*SubcmdHandler)(sqlite3 *db, const char *arg,
+                             const char *vault_name);
+typedef int (*SubcmdHandlerNoArg)(sqlite3 *db, const char *vault_name);
+
+typedef struct PasscSubcmd {
+  const char *name;
+  SubcmdHandler handler;
+  SubcmdHandlerNoArg handler_noarg;
+} PasscSubcmd;
 
 int main(int argc, char **argv) {
   char *pname = argv[0];
