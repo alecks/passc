@@ -367,7 +367,7 @@ int interactive_derivekey(unsigned char *key, size_t keysize,
   char *passphrase = NULL;
   size_t ppcap = 0;
 
-  printf("Enter passphrase for vault: ");
+  printf("\nEnter passphrase for vault: ");
   ssize_t readlen = secure_getpassline(&passphrase, &ppcap, stdin);
   if (readlen < 1) {
     if (readlen < 0) {
@@ -466,7 +466,7 @@ int make_new_vault(sqlite3 *db, const char *vname) {
   int retcode = 0;
   char keyhash[crypto_pwhash_STRBYTES];
 
-  printf("KEY CREATION: A key will be derived from your given passphrase.\n"
+  printf("\nKEY CREATION: A key will be derived from your given passphrase.\n"
          "Ensure this is different to those used by other vaults.\n");
 
   VaultOptions vopts = {.name = vname};
