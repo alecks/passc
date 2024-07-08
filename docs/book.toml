@@ -8,4 +8,5 @@ title = "passc documentation"
 [output.html]
 default-theme = "rust"
 preferred-dark-theme = "ayu"
-site-url = "/passc"
+site-url = "/passc/"
+git-repository-url = "https://github.com/alecks/passc"

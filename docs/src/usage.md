@@ -20,7 +20,7 @@ To use a different vault, use the `-n` flag, like so:
 $ passc -nVault ls
 ```
 
-(these are gcc-style flags, there must not be a space after the flag)
+This flag can be used in all of the subcommands below, otherwise defaulting to 'main'. `passc` uses GCC-style flags, so spaces are not allowed: `-nSecrets` is correct.
 
 ## Adding a password
 
@@ -32,31 +32,33 @@ Run the following command to add a password for `github.com` in the 'main' vault
 $ passc add github.com
 Enter passphrase for vault:
 ok
-Password for 'google.com':
+Password for 'github.com':
 Done. Password ID: 1
 ```
 
-There is now a password with reference `google.com` and PWID `1` encrypted with the secret key for vault `main`.
+There is now a password with reference `github.com` and PWID `1` encrypted with the secret key for vault `main`.
 
 ## Getting a password
 
 To retrieve and decrypt a password, use the `get` subcommand, for example:
 
 ```
-$ passc get github
+$ passc get github.com
+1 | github.com
+Enter passphrase for vault:
 ```
 
-This will list the passwords in the vault with a reference that contains 'github'. If there is only one match, it will be selected. If not, you will be asked to specify which password using the PWID, for example:
+This will list the passwords in the vault with a reference that contains 'github.com'. If there is only one match, it will be selected. If not, you will be asked to specify which password using the PWID, for example:
 
 ```
-$ passc -nSecrets get example
-1 | example.org
+$ passc get example
 2 | example.org
-3 | example.com
+3 | example.org
+4 | example.com
 Select password:
 ```
 
-This will search the `Secrets` vault for passwords with a reference like `example`. Enter the PWID, e.g. `2`, to select the second password for `example.org`.
+This will search the vault for passwords with a reference like `example`. Enter the PWID, e.g. `2`, to select the first password for `example.org`.
 
 You will then be prompted for the passphrase, and the password will be decrypted.
 
@@ -66,9 +68,10 @@ The PWIDs and references of all passwords in a vault can be listed without the p
 
 ```
 $ passc ls
-1 | example.org
-2 | google.com
-3 | github.com
+1 | github.com
+2 | example.org
+3 | example.org
+4 | google.com
 ```
 
 This will list all passwords in the 'main' vault.
@@ -81,8 +84,8 @@ This command works similarly to the `get` command:
 
 ```
 $ passc rm github
-2 | github.com
-Deleting password with PWID 2. If you are unsure which password this is, use the 'get' subcommand to decrypt it before deletion.
+1 | github.com
+Deleting password with PWID 1. If you are unsure which password this is, use the 'get' subcommand to decrypt it before deletion.
 Enter passphrase for vault:
 ```
 
