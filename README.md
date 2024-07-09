@@ -1,1 +1,1 @@
-# passc
+# [passc](https://alecks.github.io/passc)
