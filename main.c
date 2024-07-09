@@ -212,22 +212,30 @@ cleanup:
   return retcode;
 }
 
+typedef struct VaultParameters {
+  const char *name;
+  unsigned int opslimit;
+  size_t memlimit;
+  int alg;
+} VaultParameters;
+
 // quite an ugly function, should create some form of structured validation
 // asks the user for an opslimit and memlimit; if unprovided or unparseable,
 // defaults to MODERATE. returns -1 if out of bounds, 0 if ok.
-int interactive_get_vaultopts(unsigned int *opslimit, size_t *memlimit) {
+int interactive_get_vaultparams(VaultParameters *vopts) {
   char *opsinp = NULL;
   size_t opscap = 0;
 
   printf("OPSLIMIT (moderate): ");
   passc_getline(&opsinp, &opscap, stdin);
 
-  *opslimit = strtol(opsinp, NULL, 10);
-  if (*opslimit == 0) {
-    *opslimit = crypto_pwhash_OPSLIMIT_MODERATE;
-  } else if (*opslimit > crypto_pwhash_OPSLIMIT_MAX) {
+  vopts->opslimit = strtol(opsinp, NULL, 10);
+  if (vopts->opslimit == 0) {
+    vopts->opslimit = crypto_pwhash_OPSLIMIT_MODERATE;
+  } else if (vopts->opslimit < crypto_pwhash_OPSLIMIT_MIN ||
+             vopts->opslimit > crypto_pwhash_OPSLIMIT_MAX) {
     free(opsinp);
-    fprintf(stderr, "opslimit was greater than the maximum permitted\n");
+    fprintf(stderr, "opslimit was outwith permitted values\n");
     return -1;
   }
   free(opsinp);
@@ -238,43 +246,46 @@ int interactive_get_vaultopts(unsigned int *opslimit, size_t *memlimit) {
   printf("MEMLIMIT (moderate): ");
   passc_getline(&meminp, &memcap, stdin);
 
-  *memlimit = strtol(meminp, NULL, 10);
-  if (*memlimit == 0) {
-    *memlimit = crypto_pwhash_MEMLIMIT_MODERATE;
-  } else if (*memlimit > crypto_pwhash_MEMLIMIT_MAX) {
-    fprintf(stderr, "memlimit was greater than the maximum permitted\n");
+  vopts->memlimit = strtol(meminp, NULL, 10);
+  if (vopts->memlimit == 0) {
+    vopts->memlimit = crypto_pwhash_MEMLIMIT_MODERATE;
+  } else if (vopts->memlimit < crypto_pwhash_MEMLIMIT_MIN ||
+             vopts->memlimit > crypto_pwhash_MEMLIMIT_MAX) {
+    fprintf(stderr, "memlimit was outwith permitted values\n");
     free(meminp);
     return -1;
   }
+
+  vopts->alg = crypto_pwhash_ALG_DEFAULT; // use recommended
 
   free(meminp);
   return 0;
 }
 
-typedef struct VaultOptions {
-  const char *name;
-  unsigned int opslimit;
-  size_t memlimit;
-  int alg;
-} VaultOptions;
-
-// gets vault options from the user, inserts into db, and writes into vopts.
-// returns -1 on err, 0 if ok.
-int vaultopts_create(sqlite3 *db, VaultOptions *vopts) {
-  if (interactive_get_vaultopts(&(vopts->opslimit), &(vopts->memlimit)) < 0) {
+// gets vault options from the user, inserts into db, and writes into vopts. if
+// overwrite is 1, UPDATE is used. returns -1 on err, 0 if ok.
+int vaultparams_create(sqlite3 *db, VaultParameters *vopts, int overwrite) {
+  if (interactive_get_vaultparams(vopts) < 0) {
     return -1;
   }
-  vopts->alg = crypto_pwhash_ALG_DEFAULT; // use recommended alg
 
   sqlite3_stmt *stmt = NULL;
-  char *queryt = sqlite3_mprintf(
-      "INSERT INTO vaults (vname, opslimit, memlimit, "
-      "alg) VALUES (%Q, %d, %d, %d)",
-      vopts->name, vopts->opslimit, vopts->memlimit, vopts->alg);
+  char *queryt = NULL;
+  if (overwrite) {
+    queryt = sqlite3_mprintf("UPDATE vaults SET opslimit = %d, memlimit = %d, "
+                             "alg = %d WHERE vname = %Q",
+                             vopts->opslimit, vopts->memlimit, vopts->alg,
+                             vopts->name);
+  } else {
+    queryt = sqlite3_mprintf("INSERT INTO vaults (vname, opslimit, memlimit, "
+                             "alg) VALUES (%Q, %d, %d, %d)",
+                             vopts->name, vopts->opslimit, vopts->memlimit,
+                             vopts->alg);
+  }
 
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
       sqlite3_step(stmt) != SQLITE_DONE) {
-    fprintf(stderr, "vaultopts_create: failed to insert vaultoptions: %s\n",
+    fprintf(stderr, "vaultparams_create: failed to insert vaultoptions: %s\n",
             sqlite3_errmsg(db));
 
     sqlite3_finalize(stmt);
@@ -282,13 +293,13 @@ int vaultopts_create(sqlite3 *db, VaultOptions *vopts) {
     return -1;
   }
 
-  verbosef("v: inserted new vault options\n");
+  verbosef("v: inserted new vault parameters\n");
   return 0;
 }
 
-// gets vault options from db, otherwise calls create_vaultoptions. returns -1
+// gets vault options from db, otherwise calls vaultparams_create. returns -1
 // on err, 0 if ok. expects vopts->name to be set.
-int vaultopts_get_or_create(sqlite3 *db, VaultOptions *vopts) {
+int vaultparams_get_or_create(sqlite3 *db, VaultParameters *vopts) {
   sqlite3_stmt *stmt;
   char *queryt = sqlite3_mprintf(
       "SELECT opslimit, memlimit, alg FROM vaults WHERE vname = %Q",
@@ -318,7 +329,7 @@ int vaultopts_get_or_create(sqlite3 *db, VaultOptions *vopts) {
 
   if (rc == SQLITE_DONE) {
     // done, no rows; create new vault
-    return vaultopts_create(db, vopts);
+    return vaultparams_create(db, vopts, 0);
   }
 
   // neither SQLITE_DONE nor SQLITE_ROW, fail
@@ -332,7 +343,7 @@ int vaultopts_get_or_create(sqlite3 *db, VaultOptions *vopts) {
 // gets or creates a salt for vault then derives a key using vopts. -1 on err, 0
 // if ok.
 int pp_derivekey(unsigned char *out, size_t outlen, char *passphrase,
-                 size_t pplen, VaultOptions *vopts) {
+                 size_t pplen, VaultParameters *vopts) {
   unsigned char salt[crypto_pwhash_SALTBYTES];
   if (salt_get_or_create(salt, sizeof(salt), vopts->name) < 0) {
     return -1;
@@ -353,7 +364,7 @@ int dk_keyhash(char *out, const unsigned char *const derivekey, size_t dklen) {
 // be able to fit crypto_secretbox_NONCEBYTES
 int pw_encrypt_secretbox(unsigned char *ciphertext, const unsigned char *pw,
                          unsigned long long pwlen, unsigned char *nonce,
-                         unsigned char *key) {
+                         const unsigned char *key) {
   randombytes_buf(nonce, crypto_secretbox_NONCEBYTES);
   return crypto_secretbox_easy(ciphertext, pw, pwlen, nonce, key);
 }
@@ -395,7 +406,7 @@ int db_open(const char *filename, sqlite3 **outhdl) {
 
 // selects the keyhash from the db, used to verify passphrases. returns 0 if ok,
 // -1 on error
-int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
+int db_vault_get_keyhash(char *out, sqlite3 *db, const char *vname) {
   int retcode = 0;
 
   sqlite3_stmt *stmt = NULL;
@@ -425,13 +436,14 @@ typedef struct PasswordData {
   const unsigned char *ciphertext;
   size_t ctsize;
   const unsigned char *nonce;
-  size_t ncesize;
+
+  const sqlite3_int64 pwid;
   const char *ref;
   const char *vname;
 } PasswordData;
 
 // inserts a pw into db, returning the pw ID if ok, or -1 if not.
-sqlite3_int64 db_insert_password(sqlite3 *db, PasswordData *pw) {
+sqlite3_int64 db_password_insert(sqlite3 *db, PasswordData *pw) {
   sqlite3_stmt *stmt = NULL;
   char *queryt = sqlite3_mprintf("INSERT INTO PASSWORDS (ref, vname, "
                                  "ciphertext, nonce) VALUES (%Q, %Q, ?, ?)",
@@ -446,7 +458,8 @@ sqlite3_int64 db_insert_password(sqlite3 *db, PasswordData *pw) {
   sqlite3_free(queryt);
 
   sqlite3_bind_blob(stmt, 1, pw->ciphertext, pw->ctsize, SQLITE_STATIC);
-  sqlite3_bind_blob(stmt, 2, pw->nonce, pw->ncesize, SQLITE_STATIC);
+  sqlite3_bind_blob(stmt, 2, pw->nonce, crypto_secretbox_NONCEBYTES,
+                    SQLITE_STATIC);
 
   if (sqlite3_step(stmt) != SQLITE_DONE) {
     fprintf(stderr, "db_insert_password: failed to insert pw: %s",
@@ -496,8 +509,8 @@ int db_print_rows(sqlite3_stmt *stmt, sqlite3_int64 *last_rowid) {
 
 // reads a passphrase from stdin and derives its secret key using pp_derivekey.
 // returns 0 if ok, -1 on err.
-int interactive_derivekey(unsigned char *key, size_t keysize,
-                          VaultOptions *vopts) {
+int interactive_derivekey_key(unsigned char *key, size_t keysize,
+                              VaultParameters *vopts) {
   int retcode = 0;
   char *passphrase = NULL;
   size_t ppcap = 0;
@@ -530,32 +543,34 @@ cleanup:
   return retcode;
 }
 
-// same as interactive_derivekey, except discards the key and returns the hash
-// of the key instead. 0 if ok, -1 on error.
-int interactive_derivekey_hash(char *outkeyhash, VaultOptions *vopts) {
-  int retcode = 0;
-  unsigned char key[crypto_secretbox_KEYBYTES];
-  sodium_mlock(key, sizeof(key));
-
-  if (interactive_derivekey(key, sizeof(key), vopts) < 0) {
-    retcode = -1;
-    goto cleanup;
+int interactive_derivekey_key_hash(unsigned char *outkey, size_t outkeysize,
+                                   char *outkeyhash, VaultParameters *vopts) {
+  if (interactive_derivekey_key(outkey, outkeysize, vopts) < 0) {
+    return -1;
   }
 
-  // we now have the key; hash this and store it so that, upon insertion into
-  // the vault, we can check if it is the correct passphrase
-  if (dk_keyhash(outkeyhash, key, sizeof(key)) != 0) {
+  if (dk_keyhash(outkeyhash, outkey, outkeysize) != 0) {
     fprintf(stderr,
             "interactive_derivekey_hash: failed to hash derived key, OOM?\n");
-    retcode = -1;
-    goto cleanup;
+    return -1;
   }
 
   verbosef("v: derived key has been hashed\n");
+  return 0;
+}
 
-cleanup:
+// same as interactive_derivekey, except discards the key and returns the hash.
+// 0 if ok, -1 on error.
+int interactive_derivekey_hash(char *outkeyhash, VaultParameters *vopts) {
+  unsigned char key[crypto_secretbox_KEYBYTES];
+  sodium_mlock(key, sizeof(key));
+
+  if (interactive_derivekey_key_hash(key, sizeof(key), outkeyhash, vopts) < 0) {
+    sodium_munlock(key, sizeof(key));
+    return -1;
+  }
   sodium_munlock(key, sizeof(key));
-  return retcode;
+  return 0;
 }
 
 // asks user for passphrase, derives key and verifies this against the db. key
@@ -564,13 +579,13 @@ int interactive_vault_auth(sqlite3 *db, unsigned char *key, size_t keysize,
                            const char *vname) {
   char dbhash[crypto_pwhash_STRBYTES];
 
-  VaultOptions vopts = {.name = vname};
-  if (vaultopts_get_or_create(db, &vopts) < 0) {
+  VaultParameters vopts = {.name = vname};
+  if (vaultparams_get_or_create(db, &vopts) < 0) {
     return -1;
   }
 
-  if (interactive_derivekey(key, keysize, &vopts) < 0 ||
-      db_get_keyhash(dbhash, db, vname) < 0) {
+  if (interactive_derivekey_key(key, keysize, &vopts) < 0 ||
+      db_vault_get_keyhash(dbhash, db, vname) < 0) {
     return -1;
   }
 
@@ -650,48 +665,48 @@ sqlite3_int64 interactive_pw_selection(sqlite3 *db, const char *ref,
   return pwid;
 }
 
-// creates a new vault. returns 0 if ok, -1 on error. this is the main function
-// that should be used for creating new vaults. can also be used if the vault is
-// half-made, i.e. the program was terminated after inserting the vault options
-// but before adding the keyhash
-int vault_create(sqlite3 *db, const char *vname) {
-  int retcode = 0;
-  char keyhash[crypto_pwhash_STRBYTES];
-
-  printf("\nKEY CREATION: A key will be derived from your given passphrase.\n"
-         "Ensure this is different to those used by other vaults.\n");
-
-  VaultOptions vopts = {.name = vname};
-  // create the vault options
-  if (vaultopts_get_or_create(db, &vopts) < 0) {
-    return -1;
-  }
-
-  // read passphrase from user, derive secret key and hash secret key
-  if (interactive_derivekey_hash(keyhash, &vopts) < 0) {
-    return -1;
-  }
-
-  // update the vault row to include the keyhash
+int db_vault_set_keyhash(sqlite3 *db, const char *vname, const char *keyhash) {
   sqlite3_stmt *stmt = NULL;
   char *queryt = sqlite3_mprintf(
       "UPDATE vaults SET keyhash = %Q WHERE vname = %Q", keyhash, vname);
 
   if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
       sqlite3_step(stmt) != SQLITE_DONE) {
-    fprintf(stderr, "vault_create: couldn't add keyhash to vault: %s\n",
+    fprintf(stderr, "db_vault_set_keyhash: couldn't add keyhash to vault: %s\n",
             sqlite3_errmsg(db));
 
-    retcode = -1;
-    goto cleanup;
+    sqlite3_finalize(stmt);
+    return -1;
+  }
+
+  sqlite3_finalize(stmt);
+  return 0;
+}
+
+// creates a new vault. returns 0 if ok, -1 on error. this is the main function
+// that should be used for creating new vaults. can also be used if the vault is
+// half-made, i.e. the program was terminated after inserting the vault options
+// but before adding the keyhash
+int vault_create(sqlite3 *db, const char *vname) {
+  printf("\nKEY CREATION: A key will be derived from your given passphrase.\n"
+         "Ensure this is different to those used by other vaults.\n");
+
+  VaultParameters vopts = {.name = vname};
+  // create the vault options
+  // TODO: just use create
+  if (vaultparams_get_or_create(db, &vopts) < 0) {
+    return -1;
+  }
+
+  // read passphrase from user, derive secret key and hash secret key, set in db
+  char keyhash[crypto_pwhash_STRBYTES];
+  if (interactive_derivekey_hash(keyhash, &vopts) < 0 ||
+      db_vault_set_keyhash(db, vname, keyhash) < 0) {
+    return -1;
   }
 
   printf("Created new vault: %s\n", vname);
-
-cleanup:
-  sqlite3_free(queryt);
-  sqlite3_finalize(stmt);
-  return retcode;
+  return 0;
 }
 
 // checks if a vault exists, creates if it doesn't. returns 1 if already exists,
@@ -751,30 +766,193 @@ int vault_db_init(const char *vname, sqlite3 **outhdl) {
 }
 
 // prints refs and pwids to stdout; returns 0 if ok, -1 on error
-int subcmd_list_passwords(sqlite3 *db, const char *vname) {
-  int retcode = 0;
-
+int subcmd_list_vault_passwords(sqlite3 *db, const char *vname) {
   sqlite3_stmt *stmt = NULL;
   char *queryt = sqlite3_mprintf(
       "SELECT pwid, ref FROM passwords WHERE vname = %Q", vname);
 
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
-    fprintf(stderr, "subcmd_list_passwords: couldn't prepare query: %s\n",
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+  queryt = NULL;
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "subcmd_list_vault_passwords: couldn't prepare query: %s\n",
             sqlite3_errmsg(db));
-
-    sqlite3_free(queryt);
     return -1;
   }
-  sqlite3_free(queryt);
 
-  if (db_print_rows(stmt, NULL) < 0) {
-    fprintf(stderr, "subcmd_list_passwords: failed to print rows: %s\n",
+  rc = db_print_rows(stmt, NULL);
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+  if (rc < 0) {
+    fprintf(stderr, "subcmd_list_vault_passwords: failed to print rows: %s\n",
             sqlite3_errmsg(db));
-    retcode = -1;
+    return -1;
   }
 
+  return 0;
+}
+
+// updates a password, for rotating its key. requires pw->pwid, ciphertext,
+// ctsize, nonce. returns -1 on err, 0 if ok.
+int db_password_update(sqlite3 *db, PasswordData *pw) {
+  sqlite3_stmt *stmt;
+  char *queryt = sqlite3_mprintf(
+      "UPDATE passwords SET ciphertext = ?, nonce = ? WHERE pwid = ?");
+
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+  queryt = NULL;
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "db_password_update: failed to prepare stmt: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+  }
+
+  sqlite3_bind_blob(stmt, 1, pw->ciphertext, pw->ctsize, SQLITE_STATIC);
+  sqlite3_bind_blob(stmt, 2, pw->nonce, crypto_secretbox_NONCEBYTES,
+                    SQLITE_STATIC);
+  sqlite3_bind_int64(stmt, 3, pw->pwid);
+
+  rc = sqlite3_step(stmt);
   sqlite3_finalize(stmt);
-  return retcode;
+  stmt = NULL;
+  if (rc != SQLITE_DONE) {
+    fprintf(stderr, "db_password_update: failed to update password: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+  }
+
+  return 0;
+}
+
+// uses o_key to decrypt a pw, encrypts it with n_key and a new nonce, and
+// writes to the db. returns -1 on err, 0 if ok.
+int rotate_password(sqlite3 *db, PasswordData *o_pw, const unsigned char *o_key,
+                    const unsigned char *n_key) {
+  const int ptlen = o_pw->ctsize - crypto_secretbox_MACBYTES;
+  unsigned char *plaintext = malloc(ptlen);
+  sodium_mlock(plaintext, ptlen);
+
+  if (crypto_secretbox_open_easy(plaintext, o_pw->ciphertext, o_pw->ctsize,
+                                 o_pw->nonce, o_key) != 0) {
+    fprintf(stderr, "rotate_password: failed to open secretbox\n");
+
+    sodium_munlock(plaintext, ptlen);
+    free(plaintext);
+    return -1;
+  }
+
+  unsigned char n_nonce[crypto_secretbox_NONCEBYTES];
+  unsigned char *n_ct = malloc(o_pw->ctsize);
+
+  int rc = pw_encrypt_secretbox(n_ct, plaintext, ptlen, n_nonce, n_key);
+
+  sodium_munlock(plaintext, ptlen);
+  free(plaintext);
+  plaintext = NULL;
+
+  if (rc != 0) {
+    free(n_ct);
+    fprintf(stderr, "rotate_password: failed to encrypt secretbox\n");
+    return -1;
+  }
+
+  PasswordData pw = {.pwid = o_pw->pwid,
+                     .ciphertext = n_ct,
+                     .ctsize = o_pw->ctsize,
+                     .nonce = n_nonce};
+  rc = db_password_update(db, &pw);
+  free(n_ct);
+  if (rc < 0) {
+    return -1;
+  }
+
+  verbosef("v: updated password %lld\n", pw.pwid);
+  return 0;
+}
+
+// runs rotate_password on every pw in vname. returns -1 on err, 0 if ok.
+int rotate_vault_passwords(sqlite3 *db, const char *vname,
+                           const unsigned char *o_key,
+                           const unsigned char *n_key) {
+  sqlite3_stmt *stmt = NULL;
+  char *queryt = sqlite3_mprintf(
+      "SELECT pwid, ciphertext, nonce FROM passwords WHERE vname = %Q", vname);
+
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "rotate_vault_passwords: failed to prepare query\n");
+    return -1;
+  }
+
+  rc = sqlite3_step(stmt);
+  while (rc == SQLITE_ROW) {
+    PasswordData o_pw = {
+        .pwid = sqlite3_column_int64(stmt, 0),
+        .ciphertext = sqlite3_column_blob(stmt, 1),
+        .ctsize = sqlite3_column_bytes(stmt, 1),
+        .nonce = sqlite3_column_blob(stmt, 2),
+    };
+    if (rotate_password(db, &o_pw, o_key, n_key) < 0) {
+      sqlite3_finalize(stmt);
+      return -1;
+    }
+
+    rc = sqlite3_step(stmt);
+  }
+
+  if (rc != SQLITE_DONE) {
+    fprintf(stderr, "rotate_vault_passwords: sqlite didnt return DONE: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+  }
+
+  return 0;
+}
+
+// changes a vault's key. -1 on err, 0 if ok.
+int subcmd_rotate_vault(sqlite3 *db, const char *vname) {
+  printf("\nKEY ROTATION: You will be prompted for new vault parameters, then "
+         "you will be prompted for the current passphrase of vault '%s'. You "
+         "can then specify a new passphrase for the vault, which will use the "
+         "parameters specified initially.\n",
+         vname);
+
+  VaultParameters n_vopts = {.name = vname};
+  if (interactive_get_vaultparams(&n_vopts) < 0) {
+    return -1;
+  }
+
+  unsigned char o_key[crypto_secretbox_KEYBYTES];
+  sodium_mlock(o_key, sizeof(o_key));
+  printf("Current: ");
+  if (interactive_vault_auth(db, o_key, sizeof(o_key), vname) < 0) {
+    sodium_munlock(o_key, sizeof(o_key));
+    return -1;
+  }
+
+  unsigned char n_key[crypto_secretbox_KEYBYTES];
+  sodium_mlock(n_key, sizeof(n_key));
+  char n_keyhash[crypto_pwhash_STRBYTES];
+
+  printf("New: ");
+  if (interactive_derivekey_key_hash(n_key, sizeof(n_key), n_keyhash,
+                                     &n_vopts) < 0) {
+    sodium_munlock(o_key, sizeof(o_key));
+    sodium_munlock(n_key, sizeof(n_key));
+    return -1;
+  }
+
+  int rc = rotate_vault_passwords(db, vname, o_key, n_key);
+  sodium_munlock(o_key, sizeof(o_key));
+  sodium_munlock(n_key, sizeof(n_key));
+  if (rc < 0) {
+    return -1;
+  }
+
+  printf("Vault key has been rotated. New keyhash: %s\n", n_keyhash);
+  return db_vault_set_keyhash(db, vname, n_keyhash);
 }
 
 // subcommand to add a new password to a vault. returns 0 if ok, -1 on error.
@@ -821,11 +999,10 @@ int subcmd_add_password(sqlite3 *db, const char *ref, const char *vname) {
       .ciphertext = ciphertext,
       .ctsize = sizeof(ciphertext),
       .nonce = nonce,
-      .ncesize = sizeof(nonce),
       .ref = ref,
       .vname = vname,
   };
-  const sqlite3_int64 pwid = db_insert_password(db, &pwdata);
+  const sqlite3_int64 pwid = db_password_insert(db, &pwdata);
 
   if (pwid < 0) {
     return -1;
@@ -938,15 +1115,17 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
 }
 
 // prints usage to stderr
-void perr_usage(const char *pname) {
+void perr_usage(void) {
+  // clang-format off
   fprintf(stderr,
           "Usage:\n"
-          "  %s [-v vault_name] (add|rm|get) <reference, e.g. example.org>\n"
-          "  %s [-v vault_name] ls\n"
+          "  passc [-vVaultName] (add|rm|get) <reference>  Add, remove or get a password.\n"
+          "  passc [-vVaultName] ls                        List passwords in a vault.\n"
+          "  passc [-vVaultName] rotate                    Changes the passphrase for a vault.\n"
           "\n"
           "Options:\n"
-          "  -V Enable verbose logging.\n",
-          pname, pname); // could use %n$, but this is a compiler warning
+          "  -V Enable verbose logging.\n");
+  // clang-format on
 }
 
 typedef int (*SubcmdHandler)(sqlite3 *db, const char *arg,
@@ -979,7 +1158,7 @@ int main(int argc, char **argv) {
       conf_set_loglevel(1);
       break;
     default: // '?'
-      perr_usage(pname);
+      perr_usage();
       return EXIT_FAILURE;
     }
   }
@@ -989,7 +1168,7 @@ int main(int argc, char **argv) {
 
   if (optind >= argc) {
     fprintf(stderr, "%s: expected subcommand\n", pname);
-    perr_usage(pname);
+    perr_usage();
     return EXIT_FAILURE;
   }
 
@@ -1000,10 +1179,11 @@ int main(int argc, char **argv) {
   }
 
   PasscSubcmd subcmds[] = {
-      {"ls", NULL, subcmd_list_passwords},
       {"add", subcmd_add_password, NULL},
       {"rm", subcmd_rm_password, NULL},
       {"get", subcmd_get_password, NULL},
+      {"ls", NULL, subcmd_list_vault_passwords},
+      {"rotate", NULL, subcmd_rotate_vault},
   };
   const int no_subcmds = sizeof(subcmds) / sizeof(subcmds[0]);
 
@@ -1019,7 +1199,7 @@ int main(int argc, char **argv) {
       } else {
         if (optind + 1 >= argc) {
           fprintf(stderr, "%s: expected argument\n", pname);
-          perr_usage(pname);
+          perr_usage();
 
           retcode = EXIT_FAILURE;
           break;
