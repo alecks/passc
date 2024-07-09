@@ -190,22 +190,21 @@ int salt_get_or_create(unsigned char *salt, size_t n, const char *vname) {
   }
 
   size_t readlen = fread(salt, 1, n, fp);
-  if (ferror(fp) != 0) {
+  int ferr = ferror(fp);
+  fclose(fp);
+  fp = NULL;
+
+  if (ferr != 0) {
     perror("salt_get_or_create: failed to read salt file");
-    retcode = -1;
-    goto cleanup;
+    return -1;
   } else if (readlen != n) {
     fprintf(
         stderr,
         "salt_get_or_create: read less bytes than required from salt file\n");
-    retcode = -1;
-    goto cleanup;
+    return -1;
   }
 
   verbosef("v: using found salt file\n");
-
-cleanup:
-  fclose(fp);
   return retcode;
 }
 
@@ -280,13 +279,23 @@ int vaultparams_create(sqlite3 *db, VaultParameters *vopts, int overwrite) {
                              vopts->alg);
   }
 
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
-      sqlite3_step(stmt) != SQLITE_DONE) {
-    fprintf(stderr, "vaultparams_create: failed to insert vaultoptions: %s\n",
-            sqlite3_errmsg(db));
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+  queryt = NULL;
 
-    sqlite3_finalize(stmt);
-    sqlite3_free(queryt);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "vaultparams_create: failed to prepare stmt: %s",
+            sqlite3_errmsg(db));
+    return -1;
+  }
+
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  if (rc != SQLITE_DONE) {
+    fprintf(stderr, "vaultparams_create: sqlite didnt return DONE: %s\n",
+            sqlite3_errmsg(db));
     return -1;
   }
 
@@ -297,32 +306,32 @@ int vaultparams_create(sqlite3 *db, VaultParameters *vopts, int overwrite) {
 // gets vault options from db, otherwise calls vaultparams_create. returns -1
 // on err, 0 if ok. expects vopts->name to be set.
 int vaultparams_get_or_create(sqlite3 *db, VaultParameters *vopts) {
-  sqlite3_stmt *stmt;
+  sqlite3_stmt *stmt = NULL;
   char *queryt = sqlite3_mprintf(
       "SELECT opslimit, memlimit, alg FROM vaults WHERE vname = %Q",
       vopts->name);
 
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
-    fprintf(stderr, "vaultopts_get_or_create: failed to prepare query\n");
-    sqlite3_free(queryt);
-    return -1;
-  }
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
   sqlite3_free(queryt);
   queryt = NULL;
 
-  int rc = sqlite3_step(stmt);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "vaultopts_get_or_create: failed to prepare query\n");
+    return -1;
+  }
+
+  rc = sqlite3_step(stmt);
   if (rc == SQLITE_ROW) {
     // we already have the vault options
     vopts->opslimit = sqlite3_column_int(stmt, 0);
     vopts->memlimit = sqlite3_column_int(stmt, 1);
     vopts->alg = sqlite3_column_int(stmt, 2);
 
-    sqlite3_finalize(stmt);
     verbosef("v: found vault hash options\n");
+    sqlite3_finalize(stmt);
     return 0;
   }
   sqlite3_finalize(stmt);
-  stmt = NULL;
 
   if (rc == SQLITE_DONE) {
     // done, no rows; create new vault
@@ -404,34 +413,38 @@ int db_open(const char *filename, sqlite3 **outhdl) {
 // selects the keyhash from the db, used to verify passphrases. returns 0 if ok,
 // -1 on error
 int db_vault_get_keyhash(char *out, sqlite3 *db, const char *vname) {
-  int retcode = 0;
-
   sqlite3_stmt *stmt = NULL;
   char *queryt =
       sqlite3_mprintf("SELECT keyhash FROM vaults WHERE vname = %Q", vname);
 
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
-      sqlite3_step(stmt) != SQLITE_ROW ||
-      sqlite3_column_type(stmt, 0) == SQLITE_NULL) {
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+  queryt = NULL;
+
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "db_vault_get_keyhash: failed to prepare query: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+  }
+
+  if (sqlite3_step(stmt) != SQLITE_ROW ||
+      sqlite3_column_type(stmt, 0) != SQLITE_TEXT) {
     fprintf(stderr, "db_get_keyhash: failed to select keyhash: %s\n",
             sqlite3_errmsg(db));
 
-    retcode = -1;
-    goto cleanup;
+    sqlite3_finalize(stmt);
+    return -1;
   }
 
   strcpy(out, (const char *)sqlite3_column_text(stmt, 0));
   verbosef("v: found existing keyhash\n");
-
-cleanup:
-  sqlite3_free(queryt);
   sqlite3_finalize(stmt);
-  return retcode;
+  return 0;
 }
 
 typedef struct PasswordData {
   const unsigned char *ciphertext;
-  size_t ctsize;
+  const size_t ctsize;
   const unsigned char *nonce;
 
   const sqlite3_int64 pwid;
@@ -446,26 +459,28 @@ sqlite3_int64 db_password_insert(sqlite3 *db, PasswordData *pw) {
                                  "ciphertext, nonce) VALUES (%Q, %Q, ?, ?)",
                                  pw->ref, pw->vname);
 
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+  queryt = NULL;
+
+  if (rc != SQLITE_OK) {
     fprintf(stderr, "db_insert_password: failed to prepare query: %s\n",
             sqlite3_errmsg(db));
-    sqlite3_free(queryt);
     return -1;
   }
-  sqlite3_free(queryt);
 
   sqlite3_bind_blob(stmt, 1, pw->ciphertext, pw->ctsize, SQLITE_STATIC);
   sqlite3_bind_blob(stmt, 2, pw->nonce, crypto_secretbox_NONCEBYTES,
                     SQLITE_STATIC);
 
-  if (sqlite3_step(stmt) != SQLITE_DONE) {
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_DONE) {
     fprintf(stderr, "db_insert_password: failed to insert pw: %s",
             sqlite3_errmsg(db));
-    sqlite3_finalize(stmt);
     return -1;
   }
 
-  sqlite3_finalize(stmt);
   return sqlite3_last_insert_rowid(db);
 }
 
@@ -508,7 +523,6 @@ int db_print_rows(sqlite3_stmt *stmt, sqlite3_int64 *last_rowid) {
 // returns 0 if ok, -1 on err.
 int interactive_derivekey_key(unsigned char *key, size_t keysize,
                               VaultParameters *vopts) {
-  int retcode = 0;
   char *passphrase = NULL;
   size_t ppcap = 0;
 
@@ -522,22 +536,22 @@ int interactive_derivekey_key(unsigned char *key, size_t keysize,
       fprintf(stderr, "passphrase is required\n");
     }
 
-    retcode = -1;
-    goto cleanup;
+    sodium_munlock(passphrase, ppcap);
+    free(passphrase);
+    return -1;
   }
 
-  if (pp_derivekey(key, keysize, passphrase, readlen, vopts) != 0) {
+  int rc = pp_derivekey(key, keysize, passphrase, readlen, vopts);
+  sodium_munlock(passphrase, ppcap);
+  free(passphrase);
+
+  if (rc != 0) {
     fprintf(stderr, "interactive_derivekey: failed to derive key\n");
-    retcode = -1;
-    goto cleanup;
+    return -1;
   }
 
   verbosef("v: key has been derived\n");
-
-cleanup:
-  sodium_munlock(passphrase, ppcap);
-  free(passphrase);
-  return retcode;
+  return 0;
 }
 
 int interactive_derivekey_key_hash(unsigned char *outkey, size_t outkeysize,
@@ -562,12 +576,10 @@ int interactive_derivekey_hash(char *outkeyhash, VaultParameters *vopts) {
   unsigned char key[crypto_secretbox_KEYBYTES];
   sodium_mlock(key, sizeof(key));
 
-  if (interactive_derivekey_key_hash(key, sizeof(key), outkeyhash, vopts) < 0) {
-    sodium_munlock(key, sizeof(key));
-    return -1;
-  }
+  int rc = interactive_derivekey_key_hash(key, sizeof(key), outkeyhash, vopts);
+
   sodium_munlock(key, sizeof(key));
-  return 0;
+  return rc;
 }
 
 // asks user for passphrase, derives key and verifies this against the db. key
@@ -577,11 +589,8 @@ int interactive_vault_auth(sqlite3 *db, unsigned char *key, size_t keysize,
   char dbhash[crypto_pwhash_STRBYTES];
 
   VaultParameters vopts = {.name = vname};
-  if (vaultparams_get_or_create(db, &vopts) < 0) {
-    return -1;
-  }
-
-  if (interactive_derivekey_key(key, keysize, &vopts) < 0 ||
+  if (vaultparams_get_or_create(db, &vopts) < 0 ||
+      interactive_derivekey_key(key, keysize, &vopts) < 0 ||
       db_vault_get_keyhash(dbhash, db, vname) < 0) {
     return -1;
   }
@@ -598,7 +607,12 @@ int interactive_vault_auth(sqlite3 *db, unsigned char *key, size_t keysize,
 // calls vault_authorise, expecting a key of size crypto_secretbox_KEYBYTES.
 int interactive_vault_auth_discard(sqlite3 *dbhdl, const char *vname) {
   unsigned char key[crypto_secretbox_KEYBYTES];
-  return interactive_vault_auth(dbhdl, key, sizeof(key), vname);
+  sodium_mlock(key, sizeof(key));
+
+  int rc = interactive_vault_auth(dbhdl, key, sizeof(key), vname);
+
+  sodium_munlock(key, sizeof(key));
+  return rc;
 }
 
 // finds passwords matching the pattern %ref%, and asks the user to select one.
@@ -611,18 +625,21 @@ sqlite3_int64 interactive_pw_selection(sqlite3 *db, const char *ref,
       "SELECT pwid, ref FROM passwords WHERE ref LIKE '%%%q%%' AND vname = %Q",
       ref, vname); // '%r%'
 
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
-    fprintf(stderr, "interactive_pw_selection: couldn't prepare stmt: %s\n",
-            sqlite3_errmsg(db));
-
-    sqlite3_free(queryt);
-    return -1;
-  }
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
   sqlite3_free(queryt);
   queryt = NULL;
 
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "interactive_pw_selection: couldn't prepare stmt: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+  }
+
   sqlite3_int64 pwid = -1;
   int pwcount = db_print_rows(stmt, &pwid);
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
   if (pwcount <= 0) {
     if (pwcount < 0) {
       fprintf(stderr, "interactive_pw_selection: failed to list pws: %s\n",
@@ -632,12 +649,8 @@ sqlite3_int64 interactive_pw_selection(sqlite3 *db, const char *ref,
               "no passwords with that reference -- try using ls subcommand\n");
     }
 
-    sqlite3_finalize(stmt);
     return -1;
   }
-
-  sqlite3_finalize(stmt);
-  stmt = NULL;
 
   if (pwcount != 1) {
     char *inp = NULL;
@@ -667,16 +680,26 @@ int db_vault_set_keyhash(sqlite3 *db, const char *vname, const char *keyhash) {
   char *queryt = sqlite3_mprintf(
       "UPDATE vaults SET keyhash = %Q WHERE vname = %Q", keyhash, vname);
 
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
-      sqlite3_step(stmt) != SQLITE_DONE) {
-    fprintf(stderr, "db_vault_set_keyhash: couldn't add keyhash to vault: %s\n",
-            sqlite3_errmsg(db));
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+  queryt = NULL;
 
-    sqlite3_finalize(stmt);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "db_vault_set_keyhash: failed to prepare query: %s\n",
+            sqlite3_errmsg(db));
     return -1;
   }
 
+  rc = sqlite3_step(stmt);
   sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  if (rc != SQLITE_DONE) {
+    fprintf(stderr, "db_vault_set_keyhash: couldn't add keyhash to vault: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+  }
+
   return 0;
 }
 
@@ -689,8 +712,7 @@ int vault_create(sqlite3 *db, const char *vname) {
          "Ensure this is different to those used by other vaults.\n");
 
   VaultParameters vopts = {.name = vname};
-  // create the vault options
-  // TODO: just use create
+  // create the vault options, or get we already have them
   if (vaultparams_get_or_create(db, &vopts) < 0) {
     return -1;
   }
@@ -715,32 +737,32 @@ int vault_init(sqlite3 *db, const char *vname) {
   char *queryt =
       sqlite3_mprintf("SELECT keyhash FROM vaults WHERE vname = %Q", vname);
 
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+  queryt = NULL;
+
+  if (rc != SQLITE_OK) {
     fprintf(stderr, "vault_init: could not prepare query: %s\n",
             sqlite3_errmsg(db));
-
-    sqlite3_free(queryt);
     return -1;
   }
-  sqlite3_free(queryt);
 
-  int retcode = 0;
-  int rc = sqlite3_step(stmt);
-  if (rc == SQLITE_DONE ||
-      (rc == SQLITE_ROW && sqlite3_column_type(stmt, 0) == SQLITE_NULL)) {
+  rc = sqlite3_step(stmt);
+  int coltype = sqlite3_column_type(stmt, 0);
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  if (rc == SQLITE_DONE || (rc == SQLITE_ROW && coltype == SQLITE_NULL)) {
     printf("vault '%s' does not exist. creating...\n", vname);
-    retcode = vault_create(db, vname);
+    return vault_create(db, vname);
   } else if (rc == SQLITE_ROW) {
     verbosef("v: vault found, continuing\n");
-    retcode = 1;
+    return 1;
   } else {
     fprintf(stderr, "vault_init: failed to advance query: %s\n",
             sqlite3_errmsg(db));
-    retcode = -1;
+    return -1;
   }
-
-  sqlite3_finalize(stmt);
-  return retcode;
 }
 
 // main function used for creating a db handle. runs db_init and
@@ -771,6 +793,7 @@ int subcmd_list_vault_passwords(sqlite3 *db, const char *vname) {
   int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
   sqlite3_free(queryt);
   queryt = NULL;
+
   if (rc != SQLITE_OK) {
     fprintf(stderr, "subcmd_list_vault_passwords: couldn't prepare query: %s\n",
             sqlite3_errmsg(db));
@@ -799,6 +822,7 @@ int db_password_update(sqlite3 *db, PasswordData *pw) {
   int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
   sqlite3_free(queryt);
   queryt = NULL;
+
   if (rc != SQLITE_OK) {
     fprintf(stderr, "db_password_update: failed to prepare stmt: %s\n",
             sqlite3_errmsg(db));
@@ -813,6 +837,7 @@ int db_password_update(sqlite3 *db, PasswordData *pw) {
   rc = sqlite3_step(stmt);
   sqlite3_finalize(stmt);
   stmt = NULL;
+
   if (rc != SQLITE_DONE) {
     fprintf(stderr, "db_password_update: failed to update password: %s\n",
             sqlite3_errmsg(db));
@@ -878,6 +903,8 @@ int rotate_vault_passwords(sqlite3 *db, const char *vname,
 
   int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
   sqlite3_free(queryt);
+  queryt = NULL;
+
   if (rc != SQLITE_OK) {
     fprintf(stderr, "rotate_vault_passwords: failed to prepare query\n");
     return -1;
@@ -898,6 +925,7 @@ int rotate_vault_passwords(sqlite3 *db, const char *vname,
 
     rc = sqlite3_step(stmt);
   }
+  sqlite3_finalize(stmt);
 
   if (rc != SQLITE_DONE) {
     fprintf(stderr, "rotate_vault_passwords: sqlite didnt return DONE: %s\n",
@@ -952,6 +980,7 @@ int subcmd_rotate_vault(sqlite3 *db, const char *vname) {
   return db_vault_set_keyhash(db, vname, n_keyhash);
 }
 
+// TODO: tidy
 // subcommand to add a new password to a vault. returns 0 if ok, -1 on error.
 int subcmd_add_password(sqlite3 *db, const char *ref, const char *vname) {
   int retcode = 0;
@@ -1016,8 +1045,6 @@ cleanup:
 }
 
 int subcmd_rm_password(sqlite3 *db, const char *ref, const char *vname) {
-  int retcode = 0;
-
   sqlite3_int64 pwid = interactive_pw_selection(db, ref, vname);
   if (pwid < 0) {
     return -1;
@@ -1026,31 +1053,39 @@ int subcmd_rm_password(sqlite3 *db, const char *ref, const char *vname) {
   printf("Deleting password with PWID %lld. If you are unsure which password "
          "this is, use the 'get' subcommand to decrypt it before deletion.\n",
          pwid);
-
   if (interactive_vault_auth_discard(db, vname) < 0) {
     return -1;
   }
 
-  sqlite3_stmt *stmt;
+  sqlite3_stmt *stmt = NULL;
   char *queryt =
       sqlite3_mprintf("DELETE FROM passwords WHERE pwid = %lld", pwid);
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
-      sqlite3_step(stmt) != SQLITE_DONE) {
+
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+  queryt = NULL;
+
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "subcmd_rm_password: failed to prepare statement: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+  }
+
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  if (rc != SQLITE_DONE) {
     fprintf(stderr, "subcmd_rm_password: failed to delete pw: %s\n",
             sqlite3_errmsg(db));
-
-    retcode = -1;
-    goto cleanup;
+    return -1;
   }
 
   verbosef("v: pw has been deleted\n");
-
-cleanup:
-  sqlite3_free(queryt);
-  sqlite3_finalize(stmt);
-  return retcode;
+  return 0;
 }
 
+// TODO: tidy
 // gets a password from the db and decrypts. -1 on err, 0 if ok.
 int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   sqlite3_int64 pwid = interactive_pw_selection(db, ref, vname);
@@ -1063,15 +1098,15 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
                                  "WHERE pwid = %lld AND vname = %Q",
                                  pwid, vname);
 
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
-    fprintf(stderr, "subcmd_get_password: failed to select cipher/nonce: %s\n",
-            sqlite3_errmsg(db));
+  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+  sqlite3_free(queryt);
+  queryt = NULL;
 
-    free(queryt);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "subcmd_get_password: failed to prepare stmt: %s\n",
+            sqlite3_errmsg(db));
     return -1;
   }
-  free(queryt);
-  queryt = NULL;
 
   if (sqlite3_step(stmt) != SQLITE_ROW) {
     fprintf(stderr, "could not get password\n");
@@ -1083,31 +1118,39 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   const int ctlen = sqlite3_column_bytes(stmt, 0);
   const unsigned char *nonce = sqlite3_column_blob(stmt, 1);
 
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
   unsigned char key[crypto_secretbox_KEYBYTES];
+  sodium_mlock(key, sizeof(key));
   if (interactive_vault_auth(db, key, sizeof(key), vname) < 0) {
-    sqlite3_finalize(stmt);
+    sodium_munlock(key, sizeof(key));
     return -1;
   }
 
-  verbosef("v: decrypting password\n");
-  unsigned char pw[ctlen - crypto_secretbox_MACBYTES + 1];
-  sodium_mlock(pw, sizeof(pw));
+  const size_t pw_s = ctlen - crypto_secretbox_MACBYTES + 1;
+  unsigned char *pw = malloc(pw_s);
+  sodium_mlock(pw, pw_s);
 
-  if (crypto_secretbox_open_easy(pw, ciphertext, ctlen, nonce, key) != 0) {
+  verbosef("v: decrypting password\n");
+  rc = crypto_secretbox_open_easy(pw, ciphertext, ctlen, nonce, key);
+  sodium_munlock(key, sizeof(key));
+
+  if (rc != 0) {
     fprintf(stderr, "FAILED to verify & decrypt. This should not be possible; "
                     "the passphrase matched. It is most likely that the salt "
                     "or ciphertext has been corrupted.\n");
 
-    sodium_munlock(pw, sizeof(pw));
-    sqlite3_finalize(stmt);
+    sodium_munlock(pw, pw_s);
+    free(pw);
     return -1;
   }
 
   pw[sizeof(pw) - 1] = '\0';
   printf("\nPWID: %lld\n--------\n%s\n", pwid, pw);
 
-  sodium_munlock(pw, sizeof(pw));
-  sqlite3_finalize(stmt);
+  sodium_munlock(pw, pw_s);
+  free(pw);
   return 0;
 }
 
