@@ -1114,27 +1114,28 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
     return -1;
   }
 
-  const unsigned char *ciphertext = sqlite3_column_blob(stmt, 0);
-  const int ctlen = sqlite3_column_bytes(stmt, 0);
-  const unsigned char *nonce = sqlite3_column_blob(stmt, 1);
-
-  sqlite3_finalize(stmt);
-  stmt = NULL;
-
   unsigned char key[crypto_secretbox_KEYBYTES];
   sodium_mlock(key, sizeof(key));
   if (interactive_vault_auth(db, key, sizeof(key), vname) < 0) {
     sodium_munlock(key, sizeof(key));
+    sqlite3_finalize(stmt);
     return -1;
   }
 
+  const unsigned char *ciphertext = sqlite3_column_blob(stmt, 0);
+  const unsigned char *nonce = sqlite3_column_blob(stmt, 1);
+
+  const int ctlen = sqlite3_column_bytes(stmt, 0);
   const size_t pw_s = ctlen - crypto_secretbox_MACBYTES + 1;
+
   unsigned char *pw = malloc(pw_s);
   sodium_mlock(pw, pw_s);
 
   verbosef("v: decrypting password\n");
   rc = crypto_secretbox_open_easy(pw, ciphertext, ctlen, nonce, key);
+
   sodium_munlock(key, sizeof(key));
+  sqlite3_finalize(stmt);
 
   if (rc != 0) {
     fprintf(stderr, "FAILED to verify & decrypt. This should not be possible; "
@@ -1146,7 +1147,7 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
     return -1;
   }
 
-  pw[sizeof(pw) - 1] = '\0';
+  pw[pw_s - 1] = '\0';
   printf("\nPWID: %lld\n--------\n%s\n", pwid, pw);
 
   sodium_munlock(pw, pw_s);
