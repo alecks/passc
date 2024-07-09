@@ -656,7 +656,7 @@ sqlite3_int64 interactive_pw_selection(sqlite3 *db, const char *ref,
     char *inp = NULL;
     size_t inpcap = 0;
 
-    printf("Select password: ");
+    printf("\nSelect password: ");
     if (passc_getline(&inp, &inpcap, stdin) < 1) {
       fprintf(stderr, "must select password\n");
       free(inp);
