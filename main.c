@@ -600,7 +600,7 @@ int interactive_vault_auth(sqlite3 *db, unsigned char *key, size_t keysize,
     return -2;
   }
 
-  printf("ok\n");
+  printf("OK\n\n");
   return 0;
 }
 
@@ -941,7 +941,7 @@ int subcmd_rotate_vault(sqlite3 *db, const char *vname) {
   printf("\nKEY ROTATION: You will be prompted for new vault parameters, then "
          "you will be prompted for the current passphrase of vault '%s'. You "
          "can then specify a new passphrase for the vault, which will use the "
-         "parameters specified initially.\n",
+         "parameters specified initially.\n\n",
          vname);
 
   VaultParameters n_vopts = {.name = vname};
