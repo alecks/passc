@@ -14,13 +14,14 @@ vault 'main' does not exist. creating...
 
 KEY CREATION: A key will be derived from your given passphrase.
 Ensure this is different to those used by other vaults.
+
 OPSLIMIT (moderate):
 MEMLIMIT (moderate):
 
 Enter passphrase for vault:
 ```
 
-> It is highly recommended to skip past the OPSLIMIT and MEMLIMIT questions; these will default to `moderate` if you do not provide a value. Otherwise, it expects an integer. The default option requires 256MiB of RAM and takes about 2 seconds to derive a key with an M3 Pro chip. If you really require your passphrase to be harder to brute-force or have limited RAM, you can increase or decrease these values. See the [libsodium docs](https://doc.libsodium.org/password_hashing/default_phf#guidelines-for-choosing-the-parameters) for more information.
+> It is highly recommended to skip past the OPSLIMIT and MEMLIMIT questions; these will default to `moderate` if you do not provide a value. Otherwise, it expects an integer. The default parameters require 256MiB of RAM and take about 2 seconds to derive a key with an M3 Pro chip. If you really require your passphrase to be harder to brute-force or have limited RAM, you can increase or decrease these values. See the [libsodium docs](https://doc.libsodium.org/password_hashing/default_phf#guidelines-for-choosing-the-parameters) for more information.
 
 This will create a new vault, 'main', and ask you to specify a passphrase. It will list nothing as there are not yet any passwords in the vault.
 
@@ -40,8 +41,10 @@ Run the following command to add a password for `github.com` in the 'main' vault
 
 ```
 $ passc add github.com
+
 Enter passphrase for vault:
-ok
+OK
+
 Password for 'github.com':
 Done. Password ID: 1
 ```
@@ -55,6 +58,7 @@ To retrieve and decrypt a password, use the `get` subcommand, for example:
 ```
 $ passc get github.com
 1 | github.com
+
 Enter passphrase for vault:
 ```
 
@@ -65,6 +69,7 @@ $ passc get example
 2 | example.org
 3 | example.org
 4 | example.com
+
 Select password:
 ```
 
@@ -96,11 +101,32 @@ This command works similarly to the `get` command:
 $ passc rm github
 1 | github.com
 Deleting password with PWID 1. If you are unsure which password this is, use the 'get' subcommand to decrypt it before deletion.
+
 Enter passphrase for vault:
 ```
 
 This password will then be deleted.
 
-## Recovering from a passphrase leak
+## Changing a vault's passphrase
 
-If your passphrase has been leaked (but not your derived secret key), it is possible to retain a minimal form of security by ensuring the `~/.passc/salts/<vault name>` file is not accessible. This salt is mixed in with your passphrase when deriving your secret key. (see [todos](./todos.md) for `rotate` subcommand)
+You can rotate the secret key used for a vault with the `rotate` command. This requires the current passphrase; it decrypts all passwords and re-encrypts them with a new key. The hash parameters can also be changed in this way.
+
+For example, to change the passphrase of vault 'main':
+
+```
+$ passc rotate
+
+KEY ROTATION: You will be prompted for new vault parameters, then you will be prompted for the current passphrase of vault 'main'. You can then specify a new passphrase for the vault, which will use the parameters specified initially.
+
+OPSLIMIT (moderate):
+MEMLIMIT (moderate):
+Current --
+Enter passphrase for vault:
+OK
+
+New --
+Enter passphase for vault:
+Vault key has been rotated. New keyhash: ...
+```
+
+> It is recommended not to change the OPSLIMIT and MEMLIMIT parameters. See [creating a vault](#creating-a-vault) for more info.
