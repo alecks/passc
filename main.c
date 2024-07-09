@@ -1034,7 +1034,7 @@ int subcmd_add_password(sqlite3 *db, const char *ref, const char *vname) {
     return -1;
   }
 
-  printf("\nDone. Password ID: %lld\n", pwid);
+  printf("\n%lld\n", pwid);
   return 0;
 
 cleanup:

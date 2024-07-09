@@ -46,7 +46,8 @@ Enter passphrase for vault:
 OK
 
 Password for 'github.com':
-Done. Password ID: 1
+
+1
 ```
 
 There is now a password with reference `github.com` and PWID `1` encrypted with the secret key for vault `main`.
