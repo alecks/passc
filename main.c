@@ -127,7 +127,7 @@ size_t passc_getline(char **lineptr, size_t *linecap, FILE *stream) {
 
 // this does NOT retain \n. locks memory with sodium_mlock; callers
 // responsibility to sodium_munlock and free. returns -1 on error, 0 on ok
-ssize_t secure_getpassline(char **lineptr, size_t *linecap, FILE *stream) {
+ssize_t secure_getline(char **lineptr, size_t *linecap, FILE *stream) {
   struct termios old, new;
 
   if (tcgetattr(fileno(stream), &old) != 0)
@@ -367,7 +367,7 @@ int interactive_derivekey(unsigned char *key, size_t keysize,
   size_t ppcap = 0;
 
   printf("\nEnter passphrase for vault: ");
-  ssize_t readlen = secure_getpassline(&passphrase, &ppcap, stdin);
+  ssize_t readlen = secure_getline(&passphrase, &ppcap, stdin);
   if (readlen < 1) {
     if (readlen < 0) {
       fprintf(stderr,
@@ -793,7 +793,7 @@ int subcmd_add_password(sqlite3 *db, const char *ref, const char *vname) {
   size_t pwcap = 0;
 
   printf("Password for '%s': ", ref);
-  int pwlen = secure_getpassline(&pw, &pwcap, stdin);
+  int pwlen = secure_getline(&pw, &pwcap, stdin);
 
   unsigned char ciphertext[crypto_secretbox_MACBYTES + pwlen];
   unsigned char nonce[crypto_secretbox_NONCEBYTES];
