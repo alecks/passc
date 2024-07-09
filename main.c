@@ -709,7 +709,7 @@ int db_vault_set_keyhash(sqlite3 *db, const char *vname, const char *keyhash) {
 // but before adding the keyhash
 int vault_create(sqlite3 *db, const char *vname) {
   printf("\nKEY CREATION: A key will be derived from your given passphrase.\n"
-         "Ensure this is different to those used by other vaults.\n");
+         "Ensure this is different to those used by other vaults.\n\n");
 
   VaultParameters vopts = {.name = vname};
   // create the vault options, or get we already have them
