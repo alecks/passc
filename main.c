@@ -156,8 +156,6 @@ ssize_t secure_getline(char **lineptr, size_t *linecap, FILE *stream) {
 
 // generates a new salt, writing it to filepath. -1 on err, 0 if ok.
 int salt_create(unsigned char *salt, size_t n, const char *filepath) {
-  int retcode = 0;
-
   verbosef("v: making new random salt\n");
   randombytes_buf(salt, n);
 
@@ -166,17 +164,16 @@ int salt_create(unsigned char *salt, size_t n, const char *filepath) {
     perror("salt_create: couldn't open salt file for writing");
     return -1;
   }
-  if (fwrite(salt, 1, n, fp) != n) {
+
+  size_t written = fwrite(salt, 1, n, fp);
+  fclose(fp);
+  if (written != n) {
     fprintf(stderr, "salt_create: unexpected num of bytes written\n");
-    retcode = -1;
-    goto cleanup;
+    return -1;
   }
 
   verbosef("v: new salt has been written at %s\n", filepath);
-
-cleanup:
-  fclose(fp);
-  return retcode;
+  return 0;
 }
 
 // tries to find a salt, or creates one with write_new_salt. 0 if ok, -1 on err.
