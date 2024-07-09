@@ -29,6 +29,12 @@
                                                                                \
   "CREATE INDEX IF NOT EXISTS refidx ON passwords (ref);"
 
+// prints to stderr and exits. this is not an issue since it's a CLI program.
+void panic_failed_malloc(void) {
+  fprintf(stderr, "panic: failed to allocate memory\n");
+  exit(EXIT_FAILURE);
+}
+
 // tries to get the homedir from passwd entry, otherwise $HOME, otherwise cwd.
 // expects out to be able to fit PATH_MAX
 void get_homedir(char *out) {
@@ -853,6 +859,9 @@ int rotate_password(sqlite3 *db, PasswordData *o_pw, const unsigned char *o_key,
                     const unsigned char *n_key) {
   const int ptlen = o_pw->ctsize - crypto_secretbox_MACBYTES;
   unsigned char *plaintext = malloc(ptlen);
+  if (!plaintext) {
+    panic_failed_malloc();
+  }
   sodium_mlock(plaintext, ptlen);
 
   if (crypto_secretbox_open_easy(plaintext, o_pw->ciphertext, o_pw->ctsize,
@@ -866,6 +875,9 @@ int rotate_password(sqlite3 *db, PasswordData *o_pw, const unsigned char *o_key,
 
   unsigned char n_nonce[crypto_secretbox_NONCEBYTES];
   unsigned char *n_ct = malloc(o_pw->ctsize);
+  if (!n_ct) {
+    panic_failed_malloc();
+  }
 
   int rc = pw_encrypt_secretbox(n_ct, plaintext, ptlen, n_nonce, n_key);
 
@@ -1129,6 +1141,9 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   const size_t pw_s = ctlen - crypto_secretbox_MACBYTES + 1;
 
   unsigned char *pw = malloc(pw_s);
+  if (!pw) {
+    panic_failed_malloc();
+  }
   sodium_mlock(pw, pw_s);
 
   verbosef("v: decrypting password\n");
