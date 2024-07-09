@@ -358,6 +358,142 @@ int pw_encrypt_secretbox(unsigned char *ciphertext, const unsigned char *pw,
   return crypto_secretbox_easy(ciphertext, pw, pwlen, nonce, key);
 }
 
+// migrates the database using MIGRATION_QUERY; returns 0 if ok, -1 on error.
+// closes db on error.
+int db_migrate_up(sqlite3 *db) {
+  char *errmsg = NULL;
+  sqlite3_exec(db, MIGRATION_QUERY, NULL, NULL, &errmsg);
+
+  if (errmsg) {
+    fprintf(stderr, "db_migrate_up: failed to migrate db: %s\n", errmsg);
+    sqlite3_free(errmsg);
+    sqlite3_close(db);
+    return -1;
+  }
+
+  verbosef("v: migrated db, no error\n");
+  return 0;
+}
+
+// opens the db and migrates up. callers responsibility to run
+// sqlite3_close, unless return value is <0.
+int db_open(const char *filename, sqlite3 **outhdl) {
+  sqlite3 *db = NULL;
+  int rc = sqlite3_open_v2(filename, &db,
+                           SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "db_init: failed to open sqlite3 db: %s\n",
+            sqlite3_errmsg(db));
+    sqlite3_close(db);
+    return -1;
+  }
+
+  *outhdl = db;
+  verbosef("v: sqlite3 db opened\n");
+  return db_migrate_up(db);
+}
+
+// selects the keyhash from the db, used to verify passphrases. returns 0 if ok,
+// -1 on error
+int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
+  int retcode = 0;
+
+  sqlite3_stmt *stmt = NULL;
+  char *queryt =
+      sqlite3_mprintf("SELECT keyhash FROM vaults WHERE vname = %Q", vname);
+
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
+      sqlite3_step(stmt) != SQLITE_ROW ||
+      sqlite3_column_type(stmt, 0) == SQLITE_NULL) {
+    fprintf(stderr, "db_get_keyhash: failed to select keyhash: %s\n",
+            sqlite3_errmsg(db));
+
+    retcode = -1;
+    goto cleanup;
+  }
+
+  strcpy(out, (const char *)sqlite3_column_text(stmt, 0));
+  verbosef("v: found existing keyhash\n");
+
+cleanup:
+  sqlite3_free(queryt);
+  sqlite3_finalize(stmt);
+  return retcode;
+}
+
+typedef struct PasswordData {
+  const unsigned char *ciphertext;
+  size_t ctsize;
+  const unsigned char *nonce;
+  size_t ncesize;
+  const char *ref;
+  const char *vname;
+} PasswordData;
+
+// inserts a pw into db, returning the pw ID if ok, or -1 if not.
+sqlite3_int64 db_insert_password(sqlite3 *db, PasswordData *pw) {
+  sqlite3_stmt *stmt = NULL;
+  char *queryt = sqlite3_mprintf("INSERT INTO PASSWORDS (ref, vname, "
+                                 "ciphertext, nonce) VALUES (%Q, %Q, ?, ?)",
+                                 pw->ref, pw->vname);
+
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
+    fprintf(stderr, "db_insert_password: failed to prepare query: %s\n",
+            sqlite3_errmsg(db));
+    sqlite3_free(queryt);
+    return -1;
+  }
+  sqlite3_free(queryt);
+
+  sqlite3_bind_blob(stmt, 1, pw->ciphertext, pw->ctsize, SQLITE_STATIC);
+  sqlite3_bind_blob(stmt, 2, pw->nonce, pw->ncesize, SQLITE_STATIC);
+
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    fprintf(stderr, "db_insert_password: failed to insert pw: %s",
+            sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+    return -1;
+  }
+
+  sqlite3_finalize(stmt);
+  return sqlite3_last_insert_rowid(db);
+}
+
+// steps a stmt, printing the rows in a human-readable format, returning the
+// number of rows. returns -1 on error. assumes the first col is a rowid.
+// last_rowid is set to the final rowid printed, or ignored if NULL.
+int db_print_rows(sqlite3_stmt *stmt, sqlite3_int64 *last_rowid) {
+  int rowcount = 0;
+
+  int rc = sqlite3_step(stmt);
+  while (rc == SQLITE_ROW) {
+    rowcount++;
+    const int nocols = sqlite3_column_count(stmt);
+
+    sqlite3_int64 rowid = sqlite3_column_int64(stmt, 0);
+    printf("%lld | ", rowid);
+    if (last_rowid) {
+      *last_rowid = rowid;
+    }
+
+    for (int i = 1; i < nocols; i++) {
+      printf("%s ", sqlite3_column_text(stmt, i));
+
+      if (i != nocols - 1) {
+        printf("| ");
+      }
+    }
+    printf("\n");
+
+    rc = sqlite3_step(stmt);
+  }
+
+  if (rc != SQLITE_DONE) {
+    return -1;
+  }
+  return rowcount;
+}
+
 // reads a passphrase from stdin and derives its secret key using pp_derivekey.
 // returns 0 if ok, -1 on err.
 int interactive_derivekey(unsigned char *key, size_t keysize,
@@ -422,39 +558,96 @@ cleanup:
   return retcode;
 }
 
-// migrates the database using MIGRATION_QUERY; returns 0 if ok, -1 on error.
-// closes db on error.
-int db_migrate_up(sqlite3 *db) {
-  char *errmsg = NULL;
-  sqlite3_exec(db, MIGRATION_QUERY, NULL, NULL, &errmsg);
+// asks user for passphrase, derives key and verifies this against the db. key
+// is written to key param. returns -1 on error, -2 if unauthorised, 0 if ok.
+int interactive_vault_auth(sqlite3 *db, unsigned char *key, size_t keysize,
+                           const char *vname) {
+  char dbhash[crypto_pwhash_STRBYTES];
 
-  if (errmsg) {
-    fprintf(stderr, "db_migrate_up: failed to migrate db: %s\n", errmsg);
-    sqlite3_free(errmsg);
-    sqlite3_close(db);
+  VaultOptions vopts = {.name = vname};
+  if (vaultopts_get_or_create(db, &vopts) < 0) {
     return -1;
   }
 
-  verbosef("v: migrated db, no error\n");
+  if (interactive_derivekey(key, keysize, &vopts) < 0 ||
+      db_get_keyhash(dbhash, db, vname) < 0) {
+    return -1;
+  }
+
+  if (crypto_pwhash_str_verify(dbhash, (const char *const)key, keysize) != 0) {
+    fprintf(stderr, "incorrect passphrase for '%s', unauthorised\n", vname);
+    return -2;
+  }
+
+  printf("ok\n");
   return 0;
 }
 
-// opens the db and migrates up. callers responsibility to run
-// sqlite3_close, unless return value is <0.
-int db_open(const char *filename, sqlite3 **outhdl) {
-  sqlite3 *db = NULL;
-  int rc = sqlite3_open_v2(filename, &db,
-                           SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
-  if (rc != SQLITE_OK) {
-    fprintf(stderr, "db_init: failed to open sqlite3 db: %s\n",
+// calls vault_authorise, expecting a key of size crypto_secretbox_KEYBYTES.
+int interactive_vault_auth_discard(sqlite3 *dbhdl, const char *vname) {
+  unsigned char key[crypto_secretbox_KEYBYTES];
+  return interactive_vault_auth(dbhdl, key, sizeof(key), vname);
+}
+
+// finds passwords matching the pattern %ref%, and asks the user to select one.
+// if there is one match, it is returned immediately. returns -1 on error and
+// pwid if ok. this is not guaranteed to be an existing pwid.
+sqlite3_int64 interactive_pw_selection(sqlite3 *db, const char *ref,
+                                       const char *vname) {
+  sqlite3_stmt *stmt = NULL;
+  char *queryt = sqlite3_mprintf(
+      "SELECT pwid, ref FROM passwords WHERE ref LIKE '%%%q%%' AND vname = %Q",
+      ref, vname); // '%r%'
+
+  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
+    fprintf(stderr, "interactive_pw_selection: couldn't prepare stmt: %s\n",
             sqlite3_errmsg(db));
-    sqlite3_close(db);
+
+    sqlite3_free(queryt);
+    return -1;
+  }
+  sqlite3_free(queryt);
+  queryt = NULL;
+
+  sqlite3_int64 pwid = -1;
+  int pwcount = db_print_rows(stmt, &pwid);
+  if (pwcount <= 0) {
+    if (pwcount < 0) {
+      fprintf(stderr, "interactive_pw_selection: failed to list pws: %s\n",
+              sqlite3_errmsg(db));
+    } else {
+      fprintf(stderr,
+              "no passwords with that reference -- try using ls subcommand\n");
+    }
+
+    sqlite3_finalize(stmt);
     return -1;
   }
 
-  *outhdl = db;
-  verbosef("v: sqlite3 db opened\n");
-  return db_migrate_up(db);
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+
+  if (pwcount != 1) {
+    char *inp = NULL;
+    size_t inpcap = 0;
+
+    printf("Select password: ");
+    if (passc_getline(&inp, &inpcap, stdin) < 1) {
+      fprintf(stderr, "must select password\n");
+      free(inp);
+      return -1;
+    }
+
+    pwid = strtoll(inp, NULL, 10);
+    free(inp);
+
+    if (pwid == 0) {
+      fprintf(stderr, "given PWID was either 0 or unable to be parsed\n");
+      return -1;
+    }
+  }
+
+  return pwid;
 }
 
 // creates a new vault. returns 0 if ok, -1 on error. this is the main function
@@ -538,106 +731,9 @@ int vault_init(sqlite3 *db, const char *vname) {
   return retcode;
 }
 
-// selects the keyhash from the db, used to verify passphrases. returns 0 if ok,
-// -1 on error
-int db_get_keyhash(char *out, sqlite3 *db, const char *vname) {
-  int retcode = 0;
-
-  sqlite3_stmt *stmt = NULL;
-  char *queryt =
-      sqlite3_mprintf("SELECT keyhash FROM vaults WHERE vname = %Q", vname);
-
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK ||
-      sqlite3_step(stmt) != SQLITE_ROW ||
-      sqlite3_column_type(stmt, 0) == SQLITE_NULL) {
-    fprintf(stderr, "db_get_keyhash: failed to select keyhash: %s\n",
-            sqlite3_errmsg(db));
-
-    retcode = -1;
-    goto cleanup;
-  }
-
-  strcpy(out, (const char *)sqlite3_column_text(stmt, 0));
-  verbosef("v: found existing keyhash\n");
-
-cleanup:
-  sqlite3_free(queryt);
-  sqlite3_finalize(stmt);
-  return retcode;
-}
-
-typedef struct PasswordData {
-  const unsigned char *ciphertext;
-  size_t ctsize;
-  const unsigned char *nonce;
-  size_t ncesize;
-  const char *ref;
-  const char *vname;
-} PasswordData;
-
-// inserts a pw into db, returning the pw ID if ok, or -1 if not.
-sqlite3_int64 db_insert_password(sqlite3 *db, PasswordData *pw) {
-  sqlite3_stmt *stmt = NULL;
-  char *queryt = sqlite3_mprintf("INSERT INTO PASSWORDS (ref, vname, "
-                                 "ciphertext, nonce) VALUES (%Q, %Q, ?, ?)",
-                                 pw->ref, pw->vname);
-
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
-    fprintf(stderr, "db_insert_password: failed to prepare query: %s\n",
-            sqlite3_errmsg(db));
-    sqlite3_free(queryt);
-    return -1;
-  }
-  sqlite3_free(queryt);
-
-  sqlite3_bind_blob(stmt, 1, pw->ciphertext, pw->ctsize, SQLITE_STATIC);
-  sqlite3_bind_blob(stmt, 2, pw->nonce, pw->ncesize, SQLITE_STATIC);
-
-  if (sqlite3_step(stmt) != SQLITE_DONE) {
-    fprintf(stderr, "db_insert_password: failed to insert pw: %s",
-            sqlite3_errmsg(db));
-    sqlite3_finalize(stmt);
-    return -1;
-  }
-
-  sqlite3_finalize(stmt);
-  return sqlite3_last_insert_rowid(db);
-}
-
-// asks user for passphrase, derives key and verifies this against the db. key
-// is written to key param. returns -1 on error, -2 if unauthorised, 0 if ok.
-int interactive_vault_auth(sqlite3 *db, unsigned char *key, size_t keysize,
-                           const char *vname) {
-  char dbhash[crypto_pwhash_STRBYTES];
-
-  VaultOptions vopts = {.name = vname};
-  if (vaultopts_get_or_create(db, &vopts) < 0) {
-    return -1;
-  }
-
-  if (interactive_derivekey(key, keysize, &vopts) < 0 ||
-      db_get_keyhash(dbhash, db, vname) < 0) {
-    return -1;
-  }
-
-  if (crypto_pwhash_str_verify(dbhash, (const char *const)key, keysize) != 0) {
-    fprintf(stderr, "incorrect passphrase for '%s', unauthorised\n", vname);
-    return -2;
-  }
-
-  printf("ok\n");
-  return 0;
-}
-
-// calls vault_authorise, expecting a key of size crypto_secretbox_KEYBYTES.
-int interactive_vault_auth_discard(sqlite3 *dbhdl, const char *vname) {
-  unsigned char key[crypto_secretbox_KEYBYTES];
-  return interactive_vault_auth(dbhdl, key, sizeof(key), vname);
-}
-
 // main function used for creating a db handle. runs db_init and
-// db_vault_init. callers responsibility to sqlite3_close if 0 returned (ok)
-int db_init(const char *vname, sqlite3 **outhdl) {
+// vault_init. callers responsibility to sqlite3_close if 0 returned (ok)
+int vault_db_init(const char *vname, sqlite3 **outhdl) {
   char dbpath[PATH_MAX];
   cwk_path_join(conf_get()->datadir, "passc.db", dbpath, sizeof(dbpath));
 
@@ -652,102 +748,6 @@ int db_init(const char *vname, sqlite3 **outhdl) {
 
   *outhdl = db;
   return 0;
-}
-
-// steps a stmt, printing the rows in a human-readable format, returning the
-// number of rows. returns -1 on error. assumes the first col is a rowid.
-// last_rowid is set to the final rowid printed, or ignored if NULL.
-int db_print_rows(sqlite3_stmt *stmt, sqlite3_int64 *last_rowid) {
-  int rowcount = 0;
-
-  int rc = sqlite3_step(stmt);
-  while (rc == SQLITE_ROW) {
-    rowcount++;
-    const int nocols = sqlite3_column_count(stmt);
-
-    sqlite3_int64 rowid = sqlite3_column_int64(stmt, 0);
-    printf("%lld | ", rowid);
-    if (last_rowid) {
-      *last_rowid = rowid;
-    }
-
-    for (int i = 1; i < nocols; i++) {
-      printf("%s ", sqlite3_column_text(stmt, i));
-
-      if (i != nocols - 1) {
-        printf("| ");
-      }
-    }
-    printf("\n");
-
-    rc = sqlite3_step(stmt);
-  }
-
-  if (rc != SQLITE_DONE) {
-    return -1;
-  }
-  return rowcount;
-}
-
-// finds passwords matching the pattern %ref%, and asks the user to select one.
-// if there is one match, it is returned immediately. returns -1 on error and
-// pwid if ok. this is not guaranteed to be an existing pwid.
-sqlite3_int64 interactive_pw_selection(sqlite3 *db, const char *ref,
-                                       const char *vname) {
-  sqlite3_stmt *stmt = NULL;
-  char *queryt = sqlite3_mprintf(
-      "SELECT pwid, ref FROM passwords WHERE ref LIKE '%%%q%%' AND vname = %Q",
-      ref, vname); // '%r%'
-
-  if (sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL) != SQLITE_OK) {
-    fprintf(stderr, "interactive_pw_selection: couldn't prepare stmt: %s\n",
-            sqlite3_errmsg(db));
-
-    sqlite3_free(queryt);
-    return -1;
-  }
-  sqlite3_free(queryt);
-  queryt = NULL;
-
-  sqlite3_int64 pwid = -1;
-  int pwcount = db_print_rows(stmt, &pwid);
-  if (pwcount <= 0) {
-    if (pwcount < 0) {
-      fprintf(stderr, "interactive_pw_selection: failed to list pws: %s\n",
-              sqlite3_errmsg(db));
-    } else {
-      fprintf(stderr,
-              "no passwords with that reference -- try using ls subcommand\n");
-    }
-
-    sqlite3_finalize(stmt);
-    return -1;
-  }
-
-  sqlite3_finalize(stmt);
-  stmt = NULL;
-
-  if (pwcount != 1) {
-    char *inp = NULL;
-    size_t inpcap = 0;
-
-    printf("Select password: ");
-    if (passc_getline(&inp, &inpcap, stdin) < 1) {
-      fprintf(stderr, "must select password\n");
-      free(inp);
-      return -1;
-    }
-
-    pwid = strtoll(inp, NULL, 10);
-    free(inp);
-
-    if (pwid == 0) {
-      fprintf(stderr, "given PWID was either 0 or unable to be parsed\n");
-      return -1;
-    }
-  }
-
-  return pwid;
 }
 
 // prints refs and pwids to stdout; returns 0 if ok, -1 on error
@@ -994,7 +994,7 @@ int main(int argc, char **argv) {
   }
 
   sqlite3 *db = NULL;
-  if (db_init(vault_name, &db) < 0) {
+  if (vault_db_init(vault_name, &db) < 0) {
     fprintf(stderr, "couldn't initialise database\n");
     return EXIT_FAILURE;
   }
