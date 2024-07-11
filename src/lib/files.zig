@@ -23,7 +23,7 @@ pub fn deinit(self: Self) void {
 }
 
 /// For internal use by DB. Assumes this is only called once in dbOpen, so
-/// this is not stored. Caller must free.
-pub fn dbPath(self: Self, alloc: std.mem.Allocator) ![]const u8 {
-    return std.fs.path.join(alloc, &.{ self.data_dir, "db.sqlite3" });
+/// this is not stored. Caller must free. Path is zero-terminated.
+pub fn dbPath(self: Self, alloc: std.mem.Allocator) ![:0]const u8 {
+    return std.fs.path.joinZ(alloc, &.{ self.data_dir, "db.sqlite3" });
 }

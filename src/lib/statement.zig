@@ -10,9 +10,9 @@ const Self = @This();
 db: DB,
 _stmt: ?*c.sqlite3_stmt,
 
-pub fn init(db: DB, statement_text: []const u8) DBError!Self {
+pub fn init(db: DB, statement_text: [:0]const u8) DBError!Self {
     var stmt: ?*c.sqlite3_stmt = undefined;
-    if (c.sqlite3_prepare_v2(db._db, statement_text.ptr, -1, &stmt, null) != c.SQLITE_OK) {
+    if (c.sqlite3_prepare_v2(db._db, statement_text, -1, &stmt, null) != c.SQLITE_OK) {
         db._logSqliteError("PrepareError: Statement.init");
         return DBError.PrepareError;
     }
@@ -74,9 +74,18 @@ pub fn columnInt(self: Self, n: i32) ?i32 {
     return c.sqlite3_column_int(self._stmt, n);
 }
 
+pub fn columnInt64(self: Self, n: i32) ?i64 {
+    const valtype = c.sqlite3_column_type(self._stmt, n);
+    if (valtype == c.SQLITE_NULL) {
+        return null;
+    }
+
+    return c.sqlite3_column_int64(self._stmt, n);
+}
+
 /// Binds TEXT to the nth SQL parameter, 0-indexed (unlike the C library).
-pub fn bindText(self: Self, n: i32, text: []const u8) !void {
-    const rc = c.sqlite3_bind_text(self._stmt, n + 1, text.ptr, -1, null);
+pub fn bindText(self: Self, n: i32, text: [:0]const u8) !void {
+    const rc = c.sqlite3_bind_text(self._stmt, n + 1, text, -1, null);
     if (rc != c.SQLITE_OK) {
         self.db._logSqliteError("BindError: bind_text didn't return OK");
         return DBError.BindError;

@@ -36,7 +36,7 @@ pub fn deinit(self: Self) void {
 
 /// Gets a single vault by name. allocator is passed down to the returned Vault.
 /// The caller must deinit the returned Vault.
-pub fn getVault(self: Self, allocator: std.mem.Allocator, vault_name: []const u8) !?Vault {
+pub fn getVault(self: Self, vault_name: [:0]const u8) !?Vault {
     const stmt = try self.query("SELECT salt, keyhash, opslimit, memlimit, hashalg FROM vaults WHERE vname = ?");
     defer stmt.deinit();
 
@@ -55,20 +55,27 @@ pub fn getVault(self: Self, allocator: std.mem.Allocator, vault_name: []const u8
     }
 
     const keyhash = stmt.columnText(1).?;
-    const opslimit = stmt.columnInt(2).?;
-    const memlimit = stmt.columnInt(3).?;
+    if (keyhash.len != @sizeOf(Vault.KeyHash)) {
+        log.err("UnexpectedLength: expected keyhash to be {d} bytes, got {d}", .{ @sizeOf(Vault.KeyHash), keyhash.len });
+        return DBError.UnexpectedLength;
+    }
+
+    const opslimit = stmt.columnInt64(2).?;
+    const memlimit = stmt.columnInt64(3).?;
     const hashalg = stmt.columnInt(4).?;
 
     var vault = Vault{
-        .allocator = allocator,
         .name = vault_name,
-        .keyhash = try allocator.alloc(u8, keyhash.len),
-        .opslimit = opslimit,
-        .memlimit = memlimit,
-        .hashalg = hashalg,
+        .salt = undefined,
+        .keyhash = undefined,
+        .hash_parameters = .{
+            .opslimit = @intCast(opslimit),
+            .memlimit = @intCast(memlimit),
+            .hashalg = hashalg,
+        },
     };
 
-    @memcpy(vault.keyhash, keyhash);
+    @memcpy(&vault.keyhash, keyhash);
     @memcpy(&vault.salt, salt);
 
     return vault;
@@ -80,7 +87,7 @@ fn open(self: *Self) !void {
     const db_path = try self.files.dbPath(self.allocator);
     defer self.allocator.free(db_path);
 
-    if (c.SQLITE_OK != c.sqlite3_open_v2(db_path.ptr, &self._db, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE, null)) {
+    if (c.SQLITE_OK != c.sqlite3_open_v2(db_path, &self._db, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE, null)) {
         return DBError.OpenError;
     }
 
@@ -94,11 +101,11 @@ fn close(self: Self) void {
 
 // Executes a SQL statement, where the result is not needed. Returns DBError.ExecError
 // if there is an error, otherwise nothing.
-fn exec(self: Self, statements: []const u8) DBError!void {
+fn exec(self: Self, statements: [:0]const u8) DBError!void {
     var err_message: [*c]u8 = undefined;
     errdefer c.sqlite3_free(err_message);
 
-    _ = c.sqlite3_exec(self._db, statements.ptr, null, null, &err_message);
+    _ = c.sqlite3_exec(self._db, statements, null, null, &err_message);
 
     if (err_message) |e| {
         log.err("ExecError: {s}", .{e});
@@ -107,7 +114,7 @@ fn exec(self: Self, statements: []const u8) DBError!void {
 }
 
 // Returns a new Statement. Caller must deinit.
-fn query(self: Self, statement: []const u8) DBError!Statement {
+fn query(self: Self, statement: [:0]const u8) DBError!Statement {
     return Statement.init(self, statement);
 }
 
