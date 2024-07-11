@@ -15,5 +15,8 @@ pub fn main() !void {
     var passc = try Passc.init(allocator, null);
     defer passc.deinit();
 
-    try passc.db.getVault("test");
+    const vault = try Passc.Vault.get(allocator, passc.db, "test") orelse return;
+    defer vault.deinit();
+
+    std.debug.print("vault salt: {s}\nkeyhash: {s}\n", .{ vault.salt, vault.keyhash });
 }
