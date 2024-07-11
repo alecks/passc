@@ -1,21 +1,21 @@
 const std = @import("std");
+const crypto = std.crypto;
 const DB = @import("db.zig");
 
 const Self = @This();
 
+pub const Salt = [16]u8;
+
 allocator: std.mem.Allocator,
 
 name: []const u8,
-// these are allocated by the DB
-salt: []u8 = undefined,
+salt: Salt = undefined,
 keyhash: []u8 = undefined,
 opslimit: i32,
 memlimit: i32,
 hashalg: i32,
 
 pub fn deinit(self: Self) void {
-    // allocated by the DB
-    self.allocator.free(self.salt);
     self.allocator.free(self.keyhash);
 }
 
@@ -28,11 +28,20 @@ pub fn get(allocator: std.mem.Allocator, db: DB, name: []const u8) !?Self {
 
 /// Derives a key from a passphrase, hashes the key and generates a salt. Written to DB.
 /// Must call deinit.
-pub fn create(db: DB, name: []const u8, passphrase: []const u8) !Self {
+pub fn create(allocator: std.mem.Allocator, db: DB, name: []const u8, passphrase: []const u8) !Self {
     _ = db;
-    _ = name;
     _ = passphrase;
-    // self.salt = generateSalt()...
+
+    const salt = generateSalt();
+
+    return Self{
+        .allocator = allocator,
+        .name = name,
+        .salt = salt,
+        .opslimit = 0,
+        .memlimit = 0,
+        .hashalg = 0,
+    };
 }
 
 /// Derives a key from a passphrase, hashes said key, and verifies it against the keyhash.
@@ -53,4 +62,12 @@ pub fn decryptMessage(self: Self, passphrase: []const u8, ciphertext: []const u8
     _ = self;
     _ = passphrase;
     _ = ciphertext;
+}
+
+/// Generates a new salt, 8 bytes in size, and returns it.
+pub fn generateSalt() Salt {
+    var salt: Salt = undefined;
+    crypto.random.bytes(&salt);
+
+    return salt;
 }

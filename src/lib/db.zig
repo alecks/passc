@@ -9,7 +9,7 @@ const log = std.log.scoped(.PasscDB);
 
 const Self = @This();
 
-pub const DBError = error{ OpenError, ExecError, PrepareError, StepError, BindError };
+pub const DBError = error{ OpenError, ExecError, PrepareError, StepError, BindError, UnexpectedLength };
 
 _db: ?*c.sqlite3 = undefined,
 allocator: std.mem.Allocator,
@@ -49,24 +49,27 @@ pub fn getVault(self: Self, allocator: std.mem.Allocator, vault_name: []const u8
 
     // these are all NOT NULL columns.
     const salt = stmt.columnBlob(0).?;
+    if (salt.len != @sizeOf(Vault.Salt)) {
+        log.err("UnexpectedLength: expected salt to be {d} bytes, got {d}", .{ @sizeOf(Vault.Salt), salt.len });
+        return DBError.UnexpectedLength;
+    }
+
     const keyhash = stmt.columnText(1).?;
     const opslimit = stmt.columnInt(2).?;
     const memlimit = stmt.columnInt(3).?;
     const hashalg = stmt.columnInt(4).?;
 
-    const vault = Vault{
+    var vault = Vault{
         .allocator = allocator,
         .name = vault_name,
-        .salt = try allocator.alloc(u8, salt.len),
         .keyhash = try allocator.alloc(u8, keyhash.len),
         .opslimit = opslimit,
         .memlimit = memlimit,
         .hashalg = hashalg,
     };
 
-    // sqlite cleans these up on finalize, so we have to copy
-    @memcpy(vault.salt, salt);
     @memcpy(vault.keyhash, keyhash);
+    @memcpy(&vault.salt, salt);
 
     return vault;
 }
