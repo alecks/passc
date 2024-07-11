@@ -4,30 +4,35 @@ const DB = @import("db.zig");
 const Self = @This();
 
 allocator: std.mem.Allocator,
-name: []const u8,
-salt: []const u8,
-keyhash: []const u8,
 
-/// Gets a vault from the database. Errors if this query fails, otherwise returns null. Application must call deinit.
-/// This can be used in conjunction with create, i.e. `try Vault.get(...) orelse try Vault.create(...)`
-pub fn get(alloc: std.mem.Allocator, db: DB, name: []const u8) !?Self {
-    _ = alloc;
-    _ = db;
-    _ = name;
+name: []const u8,
+// these are allocated by the DB
+salt: []u8 = undefined,
+keyhash: []u8 = undefined,
+opslimit: i32,
+memlimit: i32,
+hashalg: i32,
+
+pub fn deinit(self: Self) void {
+    // allocated by the DB
+    self.allocator.free(self.salt);
+    self.allocator.free(self.keyhash);
 }
 
-/// Derives a key from a passphrase, hashes the key and generates a salt. These are inserted into the DB.
-/// The application must call deinit.
-pub fn create(alloc: std.mem.Allocator, db: DB, name: []const u8, passphrase: []const u8) !Self {
-    _ = alloc;
+/// Gets a vault from the database. Errors if this query fails, otherwise returns null.
+/// This can be used in conjunction with create, i.e. `try Vault.get(...) orelse try Vault.create(...)`
+/// Must call deinit.
+pub fn get(allocator: std.mem.Allocator, db: DB, name: []const u8) !?Self {
+    return db.getVault(allocator, name);
+}
+
+/// Derives a key from a passphrase, hashes the key and generates a salt. Written to DB.
+/// Must call deinit.
+pub fn create(db: DB, name: []const u8, passphrase: []const u8) !Self {
     _ = db;
     _ = name;
     _ = passphrase;
     // self.salt = generateSalt()...
-}
-
-pub fn deinit(self: Self) void {
-    _ = self;
 }
 
 /// Derives a key from a passphrase, hashes said key, and verifies it against the keyhash.

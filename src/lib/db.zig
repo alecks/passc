@@ -9,7 +9,7 @@ const log = std.log.scoped(.PasscDB);
 
 const Self = @This();
 
-pub const DBError = error{ OpenError, ExecError, PrepareError, StepError, BindError, NoRows };
+pub const DBError = error{ OpenError, ExecError, PrepareError, StepError, BindError };
 
 _db: ?*c.sqlite3 = undefined,
 allocator: std.mem.Allocator,
@@ -34,19 +34,41 @@ pub fn deinit(self: Self) void {
     }
 }
 
-/// Gets a single vault by name.
-pub fn getVault(self: Self, vault_name: []const u8) DBError!void {
-    const stmt = try self.query("SELECT salt, keyhash, memlimit, opslimit, alg FROM vaults WHERE vname = ?");
+/// Gets a single vault by name. allocator is passed down to the returned Vault.
+/// The caller must deinit the returned Vault.
+pub fn getVault(self: Self, allocator: std.mem.Allocator, vault_name: []const u8) !?Vault {
+    const stmt = try self.query("SELECT salt, keyhash, opslimit, memlimit, hashalg FROM vaults WHERE vname = ?");
     defer stmt.deinit();
 
     try stmt.bindText(0, vault_name);
     const row_available = try stmt.step();
+
     if (!row_available) {
-        return DBError.NoRows;
+        return null;
     }
 
-    // TODO
-    std.debug.print("{?s}", .{stmt.columnText(0)});
+    // these are all NOT NULL columns.
+    const salt = stmt.columnBlob(0).?;
+    const keyhash = stmt.columnText(1).?;
+    const opslimit = stmt.columnInt(2).?;
+    const memlimit = stmt.columnInt(3).?;
+    const hashalg = stmt.columnInt(4).?;
+
+    const vault = Vault{
+        .allocator = allocator,
+        .name = vault_name,
+        .salt = try allocator.alloc(u8, salt.len),
+        .keyhash = try allocator.alloc(u8, keyhash.len),
+        .opslimit = opslimit,
+        .memlimit = memlimit,
+        .hashalg = hashalg,
+    };
+
+    // sqlite cleans these up on finalize, so we have to copy
+    @memcpy(vault.salt, salt);
+    @memcpy(vault.keyhash, keyhash);
+
+    return vault;
 }
 
 /// Opens the database, using the path from the Files struct.
@@ -93,10 +115,10 @@ fn migrate(self: Self) DBError!void {
         \\CREATE TABLE IF NOT EXISTS vaults (
         \\  vname TEXT PRIMARY KEY,
         \\  salt BLOB NOT NULL,
-        \\  keyhash TEXT UNIQUE,
+        \\  keyhash TEXT UNIQUE NOT NULL,
         \\  memlimit INTEGER NOT NULL,
         \\  opslimit INTEGER NOT NULL,
-        \\  alg INTEGER NOT NULL
+        \\  hashalg INTEGER NOT NULL
         \\);
         \\CREATE TABLE IF NOT EXISTS passwords (
         \\  pwid INTEGER PRIMARY KEY,
