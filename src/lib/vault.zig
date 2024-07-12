@@ -9,8 +9,11 @@ const Self = @This();
 
 pub const SECRETBOX_KEYBYTES = c.crypto_secretbox_KEYBYTES;
 pub const PWHASH_STRBYTES = c.crypto_pwhash_STRBYTES;
+pub const SECRETBOX_MACBYTES = c.crypto_secretbox_MACBYTES;
+pub const SECRETBOX_NONCEBYTES = c.crypto_secretbox_NONCEBYTES;
 
 pub const Salt = [16]u8;
+pub const Nonce = [c.crypto_secretbox_NONCEBYTES]u8;
 pub const VaultKey = [c.crypto_secretbox_KEYBYTES]u8;
 pub const KeyHash = [:0]u8;
 
@@ -50,30 +53,57 @@ pub fn create(allocator: std.mem.Allocator, db: DB, name: [:0]const u8, passphra
 }
 
 /// Derives a key from a passphrase, hashes said key, and verifies it against the keyhash.
-pub fn verifyPassphrase(self: Self, passphrase: []const u8) void {
-    _ = self;
-    _ = passphrase;
+/// Returns the derived key or error.IncorrectPassphrase.
+pub fn verifyPassphrase(self: Self, passphrase: [:0]const u8) !VaultKey {
+    const derived_key = try self.deriveKey(passphrase);
+    if (!self.compareKeyHash(derived_key)) {
+        return error.IncorrectPassphrase;
+    }
+
+    return derived_key;
 }
 
-/// Verifies a passphrase and encrypts a message, returning the ciphertext.
-pub fn encryptMessage(self: Self, passphrase: []const u8, message: []const u8) void {
-    _ = self;
-    _ = passphrase;
-    _ = message;
+/// Verifies a passphrase and encrypts a message, returning the combined ciphertext.
+/// ct[0..NONCE_BYTES] is nonce, ct[NONCE_BYTES..] is ciphertext.
+/// Must free result.
+pub fn encryptMessage(self: Self, allocator: std.mem.Allocator, passphrase: [:0]const u8, message: [:0]const u8) ![]const u8 {
+    const key = try self.verifyPassphrase(passphrase);
+
+    const nonce = generateNonce();
+    const ciphertext = try self.allocator.alloc(u8, c.crypto_secretbox_MACBYTES + message.len);
+    defer self.allocator.free(ciphertext);
+
+    // cast here because sodium infers size of macbytes+msglen
+    const rc = c.crypto_secretbox_easy(@ptrCast(ciphertext), message, message.len, &nonce, &key);
+    if (rc != 0) {
+        return error.SodiumError;
+    }
+
+    return std.mem.concat(allocator, u8, &.{ &nonce, ciphertext });
 }
 
-/// Verifies a passphrase and decrypts a ciphertext, returning the plaintext.
-pub fn decryptMessage(self: Self, passphrase: []const u8, ciphertext: []const u8) void {
-    _ = self;
-    _ = passphrase;
-    _ = ciphertext;
+/// Decrypts a combined ciphertext without verifying the passphrase. Returns plaintext.
+/// Must free result.
+pub fn decryptMessage(self: Self, allocator: std.mem.Allocator, passphrase: [:0]const u8, combined_ct: []const u8) ![]const u8 {
+    const key = try self.deriveKey(passphrase);
+
+    const nonce = combined_ct[0..SECRETBOX_NONCEBYTES];
+    const ciphertext = combined_ct[SECRETBOX_NONCEBYTES..];
+    const plaintext = try allocator.alloc(u8, ciphertext.len - SECRETBOX_MACBYTES);
+
+    const rc = c.crypto_secretbox_open_easy(@ptrCast(plaintext), ciphertext.ptr, ciphertext.len, nonce, &key);
+    if (rc != 0) {
+        return error.DecryptError;
+    }
+
+    return plaintext;
 }
 
 /// Derives a key for the Vault using the given passphrase. Uses hash_parameters.
 fn deriveKey(self: Self, passphrase: [:0]const u8) !VaultKey {
     var derived_key: VaultKey = undefined;
 
-    const rc = c.crypto_pwhash(derived_key[0..], derived_key.len, passphrase, passphrase.len, self.salt[0..], self.hash_parameters.opslimit, self.hash_parameters.memlimit, self.hash_parameters.hashalg);
+    const rc = c.crypto_pwhash(&derived_key, derived_key.len, passphrase, passphrase.len, &self.salt, self.hash_parameters.opslimit, self.hash_parameters.memlimit, self.hash_parameters.hashalg);
     if (rc != 0) {
         return error.SodiumError;
     }
@@ -86,7 +116,7 @@ fn hashKey(self: Self, allocator: std.mem.Allocator, key: VaultKey) !KeyHash {
     const hash = try allocator.alloc(u8, PWHASH_STRBYTES);
 
     // writes a null terminated string
-    const rc = c.crypto_pwhash_str(hash.ptr, key[0..], key.len, self.hash_parameters.keyhash_opslimit, self.hash_parameters.keyhash_memlimit);
+    const rc = c.crypto_pwhash_str(hash.ptr, &key, key.len, self.hash_parameters.keyhash_opslimit, self.hash_parameters.keyhash_memlimit);
     if (rc != 0) {
         return error.SodiumError;
     }
@@ -96,12 +126,25 @@ fn hashKey(self: Self, allocator: std.mem.Allocator, key: VaultKey) !KeyHash {
     return @ptrCast(hash);
 }
 
+/// Verifies a key against the Vault's keyhash.
+fn compareKeyHash(self: Self, key: VaultKey) bool {
+    const rc = c.crypto_pwhash_str_verify(self.keyhash, &key, SECRETBOX_KEYBYTES);
+    return rc == 0;
+}
+
 /// Generates a new 16-byte salt.
 fn generateSalt() Salt {
     var salt: Salt = undefined;
     crypto.random.bytes(&salt);
 
-    return salt; // passed by val
+    return salt;
+}
+
+fn generateNonce() Nonce {
+    var nonce: Nonce = undefined;
+    crypto.random.bytes(&nonce);
+
+    return nonce;
 }
 
 /// Params required by libsodium to derive and hash keys.

@@ -14,4 +14,13 @@ pub fn main() !void {
     defer vault.deinit();
 
     std.debug.print("vault salt: {s}\nkeyhash: {s}\n", .{ vault.salt, vault.keyhash });
+    const ciphertext = try vault.encryptMessage(allocator, "passphrase", "my password");
+    defer allocator.free(ciphertext);
+
+    std.debug.print("ciphertext: {s}\n", .{ciphertext});
+
+    const plaintext = try vault.decryptMessage(allocator, "passphrase", ciphertext);
+    defer allocator.free(plaintext);
+
+    std.debug.print("plaintext: {s}\n", .{plaintext});
 }
