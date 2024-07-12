@@ -120,24 +120,24 @@ pub fn selectPassword(self: Self, child_alloc: std.mem.Allocator, vault: Vault, 
         return null;
     }
 
-    const ref = stmt.columnText(0).?;
-    const ciphertext = stmt.columnBlob(1).?;
-
     var arena_allocator = std.heap.ArenaAllocator.init(child_alloc);
     const allocator = arena_allocator.allocator();
 
-    const password = Password{
+    const ref = stmt.columnText(0).?;
+    const ref_copy = try allocator.alloc(u8, ref.len);
+    @memcpy(ref_copy, ref);
+
+    const ciphertext = stmt.columnBlob(1).?;
+    const ciphertext_copy = try allocator.alloc(u8, ciphertext.len);
+    @memcpy(ciphertext_copy, ciphertext);
+
+    return Password{
         .id = id,
         .vault = vault,
         .allocator = arena_allocator,
-        .ref = @ptrCast(try allocator.alloc(u8, ref.len)),
-        .ciphertext = @ptrCast(try allocator.alloc(u8, ciphertext.len)),
+        .ref = @ptrCast(ref_copy),
+        .ciphertext = @ptrCast(ciphertext_copy),
     };
-
-    @memcpy(password.ref, ref);
-    @memcpy(password.ciphertext, ciphertext);
-
-    return password;
 }
 
 /// Opens the database, using the path from the Files struct.

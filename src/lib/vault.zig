@@ -76,8 +76,8 @@ pub fn addPassword(self: Vault, passphrase: [:0]const u8, ref: [:0]const u8, pla
         .vault = self,
 
         .id = id,
-        .ref = @constCast(ref),
-        .ciphertext = @constCast(ciphertext),
+        .ref = ref,
+        .ciphertext = ciphertext,
     };
 }
 
@@ -225,8 +225,8 @@ pub const Password = struct {
     vault: Vault,
 
     id: i64,
-    ref: [:0]u8,
-    ciphertext: []u8,
+    ref: [:0]const u8,
+    ciphertext: []const u8,
 
     pub fn deinit(self: Password) void {
         self.allocator.deinit();
