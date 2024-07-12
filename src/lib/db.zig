@@ -4,6 +4,7 @@ const c = @cImport({
 });
 const Files = @import("files.zig");
 const Vault = @import("vault.zig");
+const Password = Vault.Password;
 const Statement = @import("statement.zig");
 const log = std.log.scoped(.PasscDB);
 
@@ -18,7 +19,6 @@ files: Files,
 /// Opens and migrates the database. You must call deinit when finished.
 pub fn init(alloc: std.mem.Allocator, files: Files) !Self {
     var self = Self{ .allocator = alloc, .files = files };
-    errdefer self.deinit();
 
     try self.open();
     try self.migrate();
@@ -64,6 +64,7 @@ pub fn selectVault(self: Self, allocator: std.mem.Allocator, vault_name: [:0]con
 
     var vault = Vault{
         .allocator = allocator,
+        .db = self,
 
         .name = vault_name,
         .salt = undefined,
@@ -94,6 +95,49 @@ pub fn insertVault(self: Self, vault: Vault) !void {
     try stmt.bindInt(5, vault.hash_parameters.hashalg);
 
     _ = try stmt.step();
+}
+
+pub fn insertPassword(self: Self, vault_name: [:0]const u8, ref: [:0]const u8, ciphertext: []const u8) !i64 {
+    const stmt = try self.query("INSERT INTO passwords (ref, ciphertext, vname) VALUES (?,?,?)");
+    defer stmt.deinit();
+
+    try stmt.bindText(0, ref);
+    try stmt.bindBlob(1, ciphertext);
+    try stmt.bindText(2, vault_name);
+
+    _ = try stmt.step();
+
+    return self.getLastRowID();
+}
+
+pub fn selectPassword(self: Self, child_alloc: std.mem.Allocator, vault: Vault, id: i64) !?Password {
+    const stmt = try self.query("SELECT ref, ciphertext FROM passwords WHERE pwid = ? AND vname = ?");
+    try stmt.bindInt64(0, id);
+    try stmt.bindText(1, vault.name);
+
+    const row_available = try stmt.step();
+    if (!row_available) {
+        return null;
+    }
+
+    const ref = stmt.columnText(0).?;
+    const ciphertext = stmt.columnBlob(1).?;
+
+    var arena_allocator = std.heap.ArenaAllocator.init(child_alloc);
+    const allocator = arena_allocator.allocator();
+
+    const password = Password{
+        .id = id,
+        .vault = vault,
+        .allocator = arena_allocator,
+        .ref = @ptrCast(try allocator.alloc(u8, ref.len)),
+        .ciphertext = @ptrCast(try allocator.alloc(u8, ciphertext.len)),
+    };
+
+    @memcpy(password.ref, ref);
+    @memcpy(password.ciphertext, ciphertext);
+
+    return password;
 }
 
 /// Opens the database, using the path from the Files struct.
@@ -160,8 +204,13 @@ fn migrate(self: Self) DBError!void {
 }
 
 /// Gets the last error code thrown by SQLite. Must be called directly after SQLite returns an error.
-pub fn errorCode(self: Self) i32 {
+pub fn getLastErrorCode(self: Self) i32 {
     return c.sqlite3_errcode(self._db);
+}
+
+/// Gets the last INSERT's row ID. Must be called directly after insertion.
+pub fn getLastRowID(self: Self) i64 {
+    return c.sqlite3_last_insert_rowid(self._db);
 }
 
 /// Logs an error returned by sqlite (usually when a func returns non-SQLITE_OK, SQLITE_ROW, SQLITE_DONE).
