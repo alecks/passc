@@ -149,7 +149,6 @@ fn migrate(self: Self) DBError!void {
         \\  pwid INTEGER PRIMARY KEY,
         \\  ref TEXT NOT NULL,
         \\  ciphertext BLOB NOT NULL,
-        \\  nonce BLOB UNIQUE NOT NULL,
         \\  vname INTEGER NOT NULL,
         \\  FOREIGN KEY (vname) REFERENCES vaults (vname)
         \\);
