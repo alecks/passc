@@ -67,7 +67,7 @@ pub fn selectVault(self: Self, allocator: std.mem.Allocator, vault_name: [:0]con
 
         .name = vault_name,
         .salt = undefined,
-        .keyhash = try allocator.allocSentinel(u8, keyhash.len, 0), // no need for this
+        .keyhash = @ptrCast(try allocator.alloc(u8, keyhash.len)), // stmt.columnText is always null terminated
         .hash_parameters = .{
             .opslimit = @intCast(opslimit),
             .memlimit = @intCast(memlimit),
