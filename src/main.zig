@@ -5,20 +5,13 @@ const c = @cImport({
 const Passc = @import("lib/root.zig");
 
 pub fn main() !void {
-    if (c.sodium_init() < 0) {
-        std.log.err("sodium_init returned < 0\n", .{});
-        return error.SodiumInitFailed;
-    }
-
     const allocator = std.heap.c_allocator;
 
     var passc = try Passc.init(allocator, null);
     defer passc.deinit();
 
-    const vault2 = try Passc.Vault.create(passc.db, "test", "sdhjflk", .{});
-    std.debug.print("vault salt: {s}\nkeyhash: {s}\n", .{ vault2.salt, vault2.keyhash });
-
-    var vault = try Passc.Vault.get(passc.db, "test") orelse return;
+    const vault = try Passc.Vault.get(allocator, passc.db, "test") orelse try Passc.Vault.create(allocator, passc.db, "test", "passphrase", .{});
     defer vault.deinit();
+
     std.debug.print("vault salt: {s}\nkeyhash: {s}\n", .{ vault.salt, vault.keyhash });
 }

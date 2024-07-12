@@ -83,11 +83,39 @@ pub fn columnInt64(self: Self, n: i32) ?i64 {
     return c.sqlite3_column_int64(self._stmt, n);
 }
 
-/// Binds TEXT to the nth SQL parameter, 0-indexed (unlike the C library).
+/// Binds TEXT to the nth SQL parameter, 0-indexed (unlike C interface).
 pub fn bindText(self: Self, n: i32, text: [:0]const u8) !void {
     const rc = c.sqlite3_bind_text(self._stmt, n + 1, text, -1, null);
     if (rc != c.SQLITE_OK) {
         self.db._logSqliteError("BindError: bind_text didn't return OK");
+        return DBError.BindError;
+    }
+}
+
+/// Binds a BLOB value to the nth SQL parameter, 0-indexed (unlike C interface).
+pub fn bindBlob(self: Self, n: i32, blob: []const u8) !void {
+    const rc = c.sqlite3_bind_blob(self._stmt, n + 1, blob.ptr, @intCast(blob.len), null);
+    if (rc != c.SQLITE_OK) {
+        self.db._logSqliteError("BindError: bind_blob didn't return OK");
+        return DBError.BindError;
+    }
+}
+
+/// Binds an INTEGER value to the nth SQL parameter, 0-indexed (unlike C interface).
+/// Note that all SQLite INTEGERs are i64s.
+pub fn bindInt(self: Self, n: i32, integer: i32) !void {
+    const rc = c.sqlite3_bind_int(self._stmt, n + 1, integer);
+    if (rc != c.SQLITE_OK) {
+        self.db._logSqliteError("BindError: bind_int didn't return OK");
+        return DBError.BindError;
+    }
+}
+
+/// Binds an INTEGER value to the nth SQL parameter, 0-indexed (unlike C interface).
+pub fn bindInt64(self: Self, n: i32, integer: i64) !void {
+    const rc = c.sqlite3_bind_int64(self._stmt, n + 1, integer);
+    if (rc != c.SQLITE_OK) {
+        self.db._logSqliteError("BindError: bind_int64 didn't return OK");
         return DBError.BindError;
     }
 }

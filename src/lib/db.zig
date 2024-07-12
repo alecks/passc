@@ -28,15 +28,13 @@ pub fn init(alloc: std.mem.Allocator, files: Files) !Self {
 
 /// Closes the database.
 pub fn deinit(self: Self) void {
-    log.info("deiniting database", .{});
-    if (self._db) |_| {
-        self.close();
-    }
+    log.debug("deiniting database", .{});
+    self.close();
 }
 
 /// Gets a single vault by name. allocator is passed down to the returned Vault.
 /// The caller must deinit the returned Vault.
-pub fn getVault(self: Self, vault_name: [:0]const u8) !?Vault {
+pub fn selectVault(self: Self, allocator: std.mem.Allocator, vault_name: [:0]const u8) !?Vault {
     const stmt = try self.query("SELECT salt, keyhash, opslimit, memlimit, hashalg FROM vaults WHERE vname = ?");
     defer stmt.deinit();
 
@@ -55,8 +53,8 @@ pub fn getVault(self: Self, vault_name: [:0]const u8) !?Vault {
     }
 
     const keyhash = stmt.columnText(1).?;
-    if (keyhash.len != @sizeOf(Vault.KeyHash)) {
-        log.err("UnexpectedLength: expected keyhash to be {d} bytes, got {d}", .{ @sizeOf(Vault.KeyHash), keyhash.len });
+    if (keyhash.len > Vault.PWHASH_STRBYTES) {
+        log.err("UnexpectedLength: expected keyhash to <= {d} bytes, got {d}", .{ Vault.PWHASH_STRBYTES, keyhash.len });
         return DBError.UnexpectedLength;
     }
 
@@ -65,9 +63,11 @@ pub fn getVault(self: Self, vault_name: [:0]const u8) !?Vault {
     const hashalg = stmt.columnInt(4).?;
 
     var vault = Vault{
+        .allocator = allocator,
+
         .name = vault_name,
         .salt = undefined,
-        .keyhash = undefined,
+        .keyhash = try allocator.allocSentinel(u8, keyhash.len, 0), // no need for this
         .hash_parameters = .{
             .opslimit = @intCast(opslimit),
             .memlimit = @intCast(memlimit),
@@ -75,10 +75,25 @@ pub fn getVault(self: Self, vault_name: [:0]const u8) !?Vault {
         },
     };
 
-    @memcpy(&vault.keyhash, keyhash);
     @memcpy(&vault.salt, salt);
+    @memcpy(vault.keyhash, keyhash);
 
     return vault;
+}
+
+/// Inserts a new vault into the database, using INSERT, uniquely indexed by the vname.
+pub fn insertVault(self: Self, vault: Vault) !void {
+    const stmt = try self.query("INSERT INTO vaults (vname, salt, keyhash, opslimit, memlimit, hashalg) VALUES (?,?,?,?,?,?)");
+    defer stmt.deinit();
+
+    try stmt.bindText(0, vault.name);
+    try stmt.bindBlob(1, &vault.salt);
+    try stmt.bindText(2, vault.keyhash);
+    try stmt.bindInt64(3, @intCast(vault.hash_parameters.opslimit));
+    try stmt.bindInt64(4, @intCast(vault.hash_parameters.memlimit));
+    try stmt.bindInt(5, vault.hash_parameters.hashalg);
+
+    _ = try stmt.step();
 }
 
 /// Opens the database, using the path from the Files struct.
@@ -143,6 +158,11 @@ fn migrate(self: Self) DBError!void {
 
     try self.exec(migration_stmt);
     log.info("migrations succeeded with no errors", .{});
+}
+
+/// Gets the last error code thrown by SQLite. Must be called directly after SQLite returns an error.
+pub fn errorCode(self: Self) i32 {
+    return c.sqlite3_errcode(self._db);
 }
 
 /// Logs an error returned by sqlite (usually when a func returns non-SQLITE_OK, SQLITE_ROW, SQLITE_DONE).
