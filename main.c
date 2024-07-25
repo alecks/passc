@@ -25,7 +25,7 @@
   "ciphertext BLOB NOT NULL,"                                                  \
   "nonce BLOB NOT NULL,"                                                       \
   "vname INTEGER NOT NULL,"                                                    \
-  "FOREIGN KEY (vname) REFERENCES vaults (vname) ON UPDATE CASCADE);"          \
+  "FOREIGN KEY (vname) REFERENCES vaults (vname));"                            \
                                                                                \
   "CREATE INDEX IF NOT EXISTS refidx ON passwords (ref);"
 
@@ -138,7 +138,6 @@ ssize_t secure_getline(char **lineptr, size_t *linecap, FILE *stream) {
 
   if (tcgetattr(fileno(stream), &old) != 0)
     return -1;
-
   new = old;
   new.c_lflag &= ~ECHO;
   // set our new flags
@@ -719,10 +718,12 @@ int vault_create(sqlite3 *db, const char *vname) {
          "Ensure this is different to those used by other vaults.\n\n");
 
   VaultParameters vopts = {.name = vname};
+  // create the vault options, or get we already have them
   if (vaultparams_get_or_create(db, &vopts) < 0) {
     return -1;
   }
 
+  // read passphrase from user, derive secret key and hash secret key, set in db
   char keyhash[crypto_pwhash_STRBYTES];
   if (interactive_derivekey_hash(keyhash, &vopts) < 0 ||
       db_vault_set_keyhash(db, vname, keyhash) < 0) {
@@ -1169,45 +1170,6 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   return 0;
 }
 
-int subcmd_rename_vault(sqlite3 *db, const char *n_name, const char *o_name) {
-  int authorised = interactive_vault_auth_discard(db, o_name);
-  if (authorised < 0) {
-    return -1;
-  }
-
-  if (strcmp(n_name, o_name) == 0) {
-    fprintf(stderr, "this vault already has this name\n");
-    return 0;
-  }
-
-  char *queryt = sqlite3_mprintf(
-      "UPDATE vaults SET vname = %Q WHERE vname = %Q", n_name, o_name);
-  sqlite3_stmt *stmt = NULL;
-  int rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
-
-  sqlite3_free(queryt);
-  queryt = NULL;
-
-  if (rc != SQLITE_OK) {
-    fprintf(stderr, "subcmd_rename_vault: failed to prepare stmt: %s\n",
-            sqlite3_errmsg(db));
-    return -1;
-  }
-
-  rc = sqlite3_step(stmt);
-  sqlite3_finalize(stmt);
-  stmt = NULL;
-
-  if (rc != SQLITE_DONE) {
-    fprintf(stderr, "subcmd_rename_vault: failed to execute stmt: %s\n",
-            sqlite3_errmsg(db));
-    return -1;
-  }
-
-  printf("Vault '%s' has been renamed to '%s'\n", o_name, n_name);
-  return 0;
-}
-
 // prints usage to stderr
 void perr_usage(void) {
   // clang-format off
@@ -1215,8 +1177,7 @@ void perr_usage(void) {
           "Usage:\n"
           "  passc [-vVaultName] (add|rm|get) <reference>  Add, remove or get a password.\n"
           "  passc [-vVaultName] ls                        List passwords in a vault.\n"
-          "  passc [-vVaultName] rotate                    Changes a vault's passphrase, re-encrypting all passwords.\n"
-          "  passc [-vVaultName] rename <new name>         Changes the name of a vault.\n"
+          "  passc [-vVaultName] rotate                    Changes the passphrase for a vault.\n"
           "\n"
           "Options:\n"
           "  -V Enable verbose logging.\n");
@@ -1279,7 +1240,6 @@ int main(int argc, char **argv) {
       {"get", subcmd_get_password, NULL},
       {"ls", NULL, subcmd_list_vault_passwords},
       {"rotate", NULL, subcmd_rotate_vault},
-      {"rename", subcmd_rename_vault, NULL},
   };
   const int no_subcmds = sizeof(subcmds) / sizeof(subcmds[0]);
 
