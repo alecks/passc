@@ -1170,6 +1170,39 @@ int subcmd_get_password(sqlite3 *db, const char *ref, const char *vname) {
   return 0;
 }
 
+int subcmd_backup(sqlite3 *db, const char *outdir, const char *vname) {
+  (void)vname;
+
+  int rc = mkdir(outdir, 0777);
+  if (rc != 0) {
+    perror("subcmd_backup");
+    return -1;
+  }
+
+  char fp[PATH_MAX];
+  cwk_path_join(outdir, "db.sqlite3", fp, sizeof(fp));
+
+  sqlite3_stmt *stmt = NULL;
+  char *queryt = sqlite3_mprintf("VACUUM INTO %Q", fp);
+  rc = sqlite3_prepare_v2(db, queryt, -1, &stmt, NULL);
+
+  sqlite3_free(queryt);
+  if (rc != SQLITE_OK) {
+    return -1;
+  }
+
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_DONE) {
+    fprintf(stderr, "subcmd_backup: VACUUM INTO failed: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+  }
+
+  printf("database file written to %s\n", fp);
+  return 0;
+}
+
 // prints usage to stderr
 void perr_usage(void) {
   // clang-format off
@@ -1178,6 +1211,7 @@ void perr_usage(void) {
           "  passc [-vVaultName] (add|rm|get) <reference>  Add, remove or get a password.\n"
           "  passc [-vVaultName] ls                        List passwords in a vault.\n"
           "  passc [-vVaultName] rotate                    Changes the passphrase for a vault.\n"
+          "  passc backup <directory>                      Backs up the database and salts into the provided directory."
           "\n"
           "Options:\n"
           "  -V Enable verbose logging.\n");
@@ -1240,6 +1274,7 @@ int main(int argc, char **argv) {
       {"get", subcmd_get_password, NULL},
       {"ls", NULL, subcmd_list_vault_passwords},
       {"rotate", NULL, subcmd_rotate_vault},
+      {"backup", subcmd_backup, NULL},
   };
   const int no_subcmds = sizeof(subcmds) / sizeof(subcmds[0]);
 
