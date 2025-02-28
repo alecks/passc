@@ -19,6 +19,8 @@ pub const Nonce = [c.crypto_secretbox_NONCEBYTES]u8;
 pub const VaultKey = [c.crypto_secretbox_KEYBYTES]u8;
 pub const KeyHash = [:0]u8;
 
+pub const HashParametersError = error{ OpsLimitOutOfBounds, MemLimitOutOfBounds, InvalidAlg };
+
 allocator: std.mem.Allocator,
 db: DB,
 
@@ -27,10 +29,47 @@ salt: Salt,
 keyhash: KeyHash,
 hash_parameters: HashParameters,
 
-pub fn destroy(self: Vault) void {
-    log.debug("destroying vault {s}", .{self.name});
-    self.allocator.free(self.keyhash);
-}
+pub const Password = struct {
+    arena: std.mem.Allocator,
+    vault: Vault,
+
+    id: i64,
+    ref: [:0]const u8,
+    ciphertext: []const u8,
+};
+
+/// Params required by libsodium to derive and hash keys.
+pub const HashParameters = struct {
+    opslimit: u64 = c.crypto_pwhash_OPSLIMIT_MODERATE,
+    memlimit: usize = c.crypto_pwhash_MEMLIMIT_MODERATE,
+    hashalg: i32 = c.crypto_pwhash_ALG_DEFAULT,
+
+    keyhash_opslimit: u64 = c.crypto_pwhash_OPSLIMIT_INTERACTIVE,
+    keyhash_memlimit: usize = c.crypto_pwhash_MEMLIMIT_INTERACTIVE,
+
+    // Validates hash parameters, returning an error if they are not within sodium's bounds.
+    fn validate(params: HashParameters) HashParametersError!void {
+        if (params.opslimit < c.crypto_pwhash_OPSLIMIT_MIN or params.opslimit > c.crypto_pwhash_OPSLIMIT_MAX) {
+            return HashParametersError.OpsLimitOutOfBounds;
+        }
+
+        if (params.memlimit < c.crypto_pwhash_MEMLIMIT_MIN or params.memlimit > c.crypto_pwhash_MEMLIMIT_MAX) {
+            return HashParametersError.MemLimitOutOfBounds;
+        }
+
+        if (params.hashalg != c.crypto_pwhash_ALG_ARGON2ID13 and params.hashalg != c.crypto_pwhash_ALG_ARGON2I13) {
+            return HashParametersError.InvalidAlg;
+        }
+
+        if (params.keyhash_opslimit < c.crypto_pwhash_OPSLIMIT_MIN or params.keyhash_opslimit > c.crypto_pwhash_OPSLIMIT_MAX) {
+            return HashParametersError.OpsLimitOutOfBounds;
+        }
+
+        if (params.keyhash_memlimit < c.crypto_pwhash_MEMLIMIT_MIN or params.keyhash_memlimit > c.crypto_pwhash_MEMLIMIT_MAX) {
+            return HashParametersError.MemLimitOutOfBounds;
+        }
+    }
+};
 
 /// Gets a vault from the database. Errors if this query fails, otherwise returns null.
 /// Allocates -- must call destroy.
@@ -58,6 +97,13 @@ pub fn create(allocator: std.mem.Allocator, db: DB, name: [:0]const u8, passphra
     try db.insertVault(self);
     return self;
 }
+
+/// Destroys the vault, freeing its internal memory. 
+pub fn destroy(self: Vault) void {
+    log.debug("destroying vault {s}", .{self.name});
+    self.allocator.free(self.keyhash);
+}
+
 
 /// Derives a key from a passphrase, hashes said key, and verifies it against the keyhash.
 /// Returns the derived key or error.IncorrectPassphrase.
@@ -133,7 +179,7 @@ pub fn decryptMessage(self: Vault, allocator: std.mem.Allocator, passphrase: [:0
     const ciphertext = combined_ct[SECRETBOX_NONCEBYTES..];
     const plaintext = try allocator.alloc(u8, ciphertext.len - SECRETBOX_MACBYTES);
 
-    const rc = c.crypto_secretbox_open_easy(@ptrCast(plaintext), ciphertext.ptr, ciphertext.len, nonce, &key);
+    const rc = c.crypto_secretbox_open_easy(plaintext, ciphertext.ptr, ciphertext.len, nonce, &key);
     if (rc != 0) {
         return error.DecryptError;
     }
@@ -189,46 +235,3 @@ fn generateNonce() Nonce {
     return nonce;
 }
 
-/// Params required by libsodium to derive and hash keys.
-pub const HashParameters = struct {
-    opslimit: u64 = c.crypto_pwhash_OPSLIMIT_MODERATE,
-    memlimit: usize = c.crypto_pwhash_MEMLIMIT_MODERATE,
-    hashalg: i32 = c.crypto_pwhash_ALG_DEFAULT,
-
-    keyhash_opslimit: u64 = c.crypto_pwhash_OPSLIMIT_INTERACTIVE,
-    keyhash_memlimit: usize = c.crypto_pwhash_MEMLIMIT_INTERACTIVE,
-
-    // Validates hash parameters, returning an error if they are not within sodium's bounds.
-    fn validate(params: HashParameters) HashParametersError!void {
-        if (params.opslimit < c.crypto_pwhash_OPSLIMIT_MIN or params.opslimit > c.crypto_pwhash_OPSLIMIT_MAX) {
-            return HashParametersError.OpsLimitOutOfBounds;
-        }
-
-        if (params.memlimit < c.crypto_pwhash_MEMLIMIT_MIN or params.memlimit > c.crypto_pwhash_MEMLIMIT_MAX) {
-            return HashParametersError.MemLimitOutOfBounds;
-        }
-
-        if (params.hashalg != c.crypto_pwhash_ALG_ARGON2ID13 and params.hashalg != c.crypto_pwhash_ALG_ARGON2I13) {
-            return HashParametersError.InvalidAlg;
-        }
-
-        if (params.keyhash_opslimit < c.crypto_pwhash_OPSLIMIT_MIN or params.keyhash_opslimit > c.crypto_pwhash_OPSLIMIT_MAX) {
-            return HashParametersError.OpsLimitOutOfBounds;
-        }
-
-        if (params.keyhash_memlimit < c.crypto_pwhash_MEMLIMIT_MIN or params.keyhash_memlimit > c.crypto_pwhash_MEMLIMIT_MAX) {
-            return HashParametersError.MemLimitOutOfBounds;
-        }
-    }
-};
-
-pub const HashParametersError = error{ OpsLimitOutOfBounds, MemLimitOutOfBounds, InvalidAlg };
-
-pub const Password = struct {
-    arena: std.mem.Allocator,
-    vault: Vault,
-
-    id: i64,
-    ref: [:0]const u8,
-    ciphertext: []const u8,
-};
