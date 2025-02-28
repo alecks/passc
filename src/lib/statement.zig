@@ -40,7 +40,7 @@ pub fn step(self: Self) DBError!bool {
 
 /// Reads the TEXT from the nth column, 0-indexed. SQLite casts this to a string if necessary.
 /// Return value must not be used after calling deinit; SQLite manages this memory.
-pub fn columnText(self: Self, n: i32) ?[]const u8 {
+pub fn columnText(self: Self, n: i32) ?[:0]const u8 {
     const text = c.sqlite3_column_text(self._stmt, n);
     if (text) |t| {
         return std.mem.span(t);
