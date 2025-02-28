@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("sqlite3.h");
 });
+
 const Files = @import("files.zig");
 const Vault = @import("vault.zig");
 const Password = Vault.Password;
@@ -21,6 +22,7 @@ pub fn init(alloc: std.mem.Allocator, files: Files) !Self {
     var self = Self{ .allocator = alloc, .files = files };
 
     try self.open();
+    errdefer self.close();
     try self.migrate();
 
     return self;
@@ -68,7 +70,7 @@ pub fn selectVault(self: Self, allocator: std.mem.Allocator, vault_name: [:0]con
 
         .name = vault_name,
         .salt = undefined,
-        .keyhash = @ptrCast(try allocator.alloc(u8, keyhash.len)), // stmt.columnText is always null terminated
+        .keyhash = try self.allocator.allocSentinel(u8, keyhash.len, 0),
         .hash_parameters = .{
             .opslimit = @intCast(opslimit),
             .memlimit = @intCast(memlimit),
@@ -78,6 +80,7 @@ pub fn selectVault(self: Self, allocator: std.mem.Allocator, vault_name: [:0]con
 
     @memcpy(&vault.salt, salt);
     @memcpy(vault.keyhash, keyhash);
+    std.debug.print("{any}\n", .{vault.keyhash});
 
     return vault;
 }
@@ -110,8 +113,12 @@ pub fn insertPassword(self: Self, vault_name: [:0]const u8, ref: [:0]const u8, c
     return self.getLastRowID();
 }
 
-pub fn selectPassword(self: Self, child_alloc: std.mem.Allocator, vault: Vault, id: i64) !?Password {
+/// Selects a password from the database.
+/// NOTE: Intermediate memory is managed by SQLite3, freed on stmt.deinit. Password struct's memory is allocated in an arena.
+pub fn selectPassword(self: Self, pw_arena: std.mem.Allocator, vault: Vault, id: i64) !?Password {
     const stmt = try self.query("SELECT ref, ciphertext FROM passwords WHERE pwid = ? AND vname = ?");
+    defer stmt.deinit();
+
     try stmt.bindInt64(0, id);
     try stmt.bindText(1, vault.name);
 
@@ -120,21 +127,18 @@ pub fn selectPassword(self: Self, child_alloc: std.mem.Allocator, vault: Vault, 
         return null;
     }
 
-    var arena_allocator = std.heap.ArenaAllocator.init(child_alloc);
-    const allocator = arena_allocator.allocator();
-
     const ref = stmt.columnText(0).?;
-    const ref_copy = try allocator.alloc(u8, ref.len);
+    const ref_copy = try pw_arena.alloc(u8, ref.len);
     @memcpy(ref_copy, ref);
 
     const ciphertext = stmt.columnBlob(1).?;
-    const ciphertext_copy = try allocator.alloc(u8, ciphertext.len);
+    const ciphertext_copy = try pw_arena.alloc(u8, ciphertext.len);
     @memcpy(ciphertext_copy, ciphertext);
 
     return Password{
         .id = id,
         .vault = vault,
-        .allocator = arena_allocator,
+        .arena = pw_arena,
         .ref = @ptrCast(ref_copy),
         .ciphertext = @ptrCast(ciphertext_copy),
     };
@@ -179,6 +183,7 @@ fn query(self: Self, statement: [:0]const u8) DBError!Statement {
 
 /// Migrates the DB up. Migrations should be simple and use IF NOT EXISTS to avoid errors.
 fn migrate(self: Self) DBError!void {
+    // TODO: make this more modular
     const migration_stmt =
         \\PRAGMA foreign_keys = ON;
         \\CREATE TABLE IF NOT EXISTS vaults (

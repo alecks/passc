@@ -1,9 +1,11 @@
 const std = @import("std");
-const crypto = std.crypto;
 const c = @cImport({
     @cInclude("sodium.h");
 });
 const DB = @import("db.zig");
+
+const log = std.log.scoped(.PasscVault);
+const crypto = std.crypto;
 
 const Vault = @This();
 
@@ -25,17 +27,19 @@ salt: Salt,
 keyhash: KeyHash,
 hash_parameters: HashParameters,
 
-pub fn deinit(self: Vault) void {
+pub fn destroy(self: Vault) void {
+    log.debug("destroying vault {s}", .{self.name});
     self.allocator.free(self.keyhash);
 }
 
 /// Gets a vault from the database. Errors if this query fails, otherwise returns null.
-/// This can be used in conjunction with create, i.e. `try Vault.get(...) orelse try Vault.create(...)`
+/// Allocates -- must call destroy.
 pub fn get(allocator: std.mem.Allocator, db: DB, name: [:0]const u8) !?Vault {
     return db.selectVault(allocator, name);
 }
 
 /// Derives a key from a passphrase, hashes the key and generates a salt. Written to DB.
+/// Allocates -- must call destroy.
 pub fn create(allocator: std.mem.Allocator, db: DB, name: [:0]const u8, passphrase: [:0]const u8, hash_parameters: HashParameters) !Vault {
     try hash_parameters.validate();
     var self = Vault{
@@ -49,7 +53,7 @@ pub fn create(allocator: std.mem.Allocator, db: DB, name: [:0]const u8, passphra
     };
 
     const derived_key = try self.deriveKey(passphrase);
-    self.keyhash = try self.hashKey(allocator, derived_key);
+    self.keyhash = try self.hashKey(derived_key);
 
     try db.insertVault(self);
     return self;
@@ -67,12 +71,13 @@ pub fn verifyPassphrase(self: Vault, passphrase: [:0]const u8) !VaultKey {
 }
 
 /// Adds a Password to the database, encrypting the plaintext with passphrase. Verifies passphrase.
-pub fn addPassword(self: Vault, passphrase: [:0]const u8, ref: [:0]const u8, plaintext: [:0]const u8) !Password {
-    const ciphertext = try self.encryptMessage(self.allocator, passphrase, plaintext);
+/// Arena allocates -- caller must deinit pw_arena.
+pub fn addPassword(self: Vault, pw_arena: std.mem.Allocator, passphrase: [:0]const u8, ref: [:0]const u8, plaintext: [:0]const u8) !Password {
+    const ciphertext = try self.encryptMessage(pw_arena, passphrase, plaintext);
 
     const id = try self.db.insertPassword(self.name, ref, ciphertext);
     return Password{
-        .allocator = std.heap.ArenaAllocator.init(self.allocator),
+        .arena = pw_arena,
         .vault = self,
 
         .id = id,
@@ -82,9 +87,9 @@ pub fn addPassword(self: Vault, passphrase: [:0]const u8, ref: [:0]const u8, pla
 }
 
 /// Gets an encrypted Password by ID from the database. Can be decrypted with Password.decrypt.
-/// Must call deinit on the returned Password.
-pub fn getPassword(self: Vault, allocator: std.mem.Allocator, id: i64) !?Password {
-    return self.db.selectPassword(allocator, self, id);
+/// Arena allocates -- caller must deinit pw_arena.
+pub fn getPassword(self: Vault, pw_arena: std.mem.Allocator, id: i64) !?Password {
+    return self.db.selectPassword(pw_arena, self, id);
 }
 
 /// Lists all passwords in the Vault. Result length will be <= limit. Start from previous limit
@@ -103,13 +108,12 @@ pub fn getPasswordsByRef(self: Vault, ref: [:0]const u8) ![]const Password {
 
 /// Verifies a passphrase and encrypts a message, returning the combined ciphertext.
 /// ct[0..NONCE_BYTES] is nonce, ct[NONCE_BYTES..] is ciphertext.
-/// Must free result.
-pub fn encryptMessage(self: Vault, allocator: std.mem.Allocator, passphrase: [:0]const u8, message: [:0]const u8) ![]const u8 {
+/// Must deinit the pwAllocator.
+pub fn encryptMessage(self: Vault, pw_arena: std.mem.Allocator, passphrase: [:0]const u8, message: [:0]const u8) ![]const u8 {
     const key = try self.verifyPassphrase(passphrase);
 
     const nonce = generateNonce();
-    const ciphertext = try self.allocator.alloc(u8, c.crypto_secretbox_MACBYTES + message.len);
-    defer self.allocator.free(ciphertext);
+    const ciphertext = try pw_arena.alloc(u8, c.crypto_secretbox_MACBYTES + message.len);
 
     // cast here because sodium infers size of macbytes+msglen
     const rc = c.crypto_secretbox_easy(@ptrCast(ciphertext), message, message.len, &nonce, &key);
@@ -117,7 +121,7 @@ pub fn encryptMessage(self: Vault, allocator: std.mem.Allocator, passphrase: [:0
         return error.SodiumError;
     }
 
-    return std.mem.concat(allocator, u8, &.{ &nonce, ciphertext });
+    return std.mem.concat(pw_arena, u8, &.{ &nonce, ciphertext });
 }
 
 /// Decrypts a combined ciphertext without verifying the passphrase. Returns plaintext.
@@ -150,18 +154,18 @@ fn deriveKey(self: Vault, passphrase: [:0]const u8) !VaultKey {
 }
 
 /// Hashes the given derived key for the Vault. Uses hash_parameters.keyhash_...
-fn hashKey(self: Vault, allocator: std.mem.Allocator, key: VaultKey) !KeyHash {
-    const hash = try allocator.alloc(u8, PWHASH_STRBYTES);
+/// Allocates -- must free result.
+fn hashKey(self: Vault, key: VaultKey) !KeyHash {
+    const keyhash: KeyHash = try self.allocator.allocSentinel(u8, PWHASH_STRBYTES - 1, 0);
 
-    // writes a null terminated string
-    const rc = c.crypto_pwhash_str(hash.ptr, &key, key.len, self.hash_parameters.keyhash_opslimit, self.hash_parameters.keyhash_memlimit);
+    // writes a PWHASH_STRBYTES size, null terminated string
+    // see libsodium docs: https://libsodium.gitbook.io/doc/password_hashing/default_phf#password-storage
+    const rc = c.crypto_pwhash_str(keyhash, &key, key.len, self.hash_parameters.keyhash_opslimit, self.hash_parameters.keyhash_memlimit);
     if (rc != 0) {
         return error.SodiumError;
     }
 
-    // see libsodium docs: https://libsodium.gitbook.io/doc/password_hashing/default_phf#password-storage
-    // hash will always be null terminated
-    return @ptrCast(hash);
+    return keyhash;
 }
 
 /// Verifies a key against the Vault's keyhash.
@@ -221,14 +225,10 @@ pub const HashParameters = struct {
 pub const HashParametersError = error{ OpsLimitOutOfBounds, MemLimitOutOfBounds, InvalidAlg };
 
 pub const Password = struct {
-    allocator: std.heap.ArenaAllocator,
+    arena: std.mem.Allocator,
     vault: Vault,
 
     id: i64,
     ref: [:0]const u8,
     ciphertext: []const u8,
-
-    pub fn deinit(self: Password) void {
-        self.allocator.deinit();
-    }
 };
